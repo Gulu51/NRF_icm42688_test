@@ -80,6 +80,9 @@
 #include "nrf_log_ctrl.h"
 #include "nrf_log_default_backends.h"
 
+#include "MyLog.h"
+
+
 #define APP_BLE_CONN_CFG_TAG            1                                           /**< A tag identifying the SoftDevice BLE configuration. */
 
 #define DEVICE_NAME                     "Nordic_UART"                               /**< Name of device. Will be included in the advertising data. */
@@ -198,27 +201,28 @@ static void nus_data_handler(ble_nus_evt_t * p_evt)
 
     if (p_evt->type == BLE_NUS_EVT_RX_DATA)
     {
-        uint32_t err_code;
+//        uint32_t err_code;
+        MY_LOG_DEBUG("nus_len = %d",p_evt->params.rx_data.length);
+        SEGGER_RTT_printf(0, p_evt->params.rx_data.p_data);
+        // NRF_LOG_DEBUG("Received data from BLE NUS. Writing data on UART.");
+        // NRF_LOG_HEXDUMP_DEBUG(p_evt->params.rx_data.p_data, p_evt->params.rx_data.length);
 
-        NRF_LOG_DEBUG("Received data from BLE NUS. Writing data on UART.");
-        NRF_LOG_HEXDUMP_DEBUG(p_evt->params.rx_data.p_data, p_evt->params.rx_data.length);
-
-        for (uint32_t i = 0; i < p_evt->params.rx_data.length; i++)
-        {
-            do
-            {
-                err_code = app_uart_put(p_evt->params.rx_data.p_data[i]);
-                if ((err_code != NRF_SUCCESS) && (err_code != NRF_ERROR_BUSY))
-                {
-                    NRF_LOG_ERROR("Failed receiving NUS message. Error 0x%x. ", err_code);
-                    APP_ERROR_CHECK(err_code);
-                }
-            } while (err_code == NRF_ERROR_BUSY);
-        }
-        if (p_evt->params.rx_data.p_data[p_evt->params.rx_data.length - 1] == '\r')
-        {
-            while (app_uart_put('\n') == NRF_ERROR_BUSY);
-        }
+        // for (uint32_t i = 0; i < p_evt->params.rx_data.length; i++)
+        // {
+        //     do
+        //     {
+        //         err_code = app_uart_put(p_evt->params.rx_data.p_data[i]);
+        //         if ((err_code != NRF_SUCCESS) && (err_code != NRF_ERROR_BUSY))
+        //         {
+        //             NRF_LOG_ERROR("Failed receiving NUS message. Error 0x%x. ", err_code);
+        //             APP_ERROR_CHECK(err_code);
+        //         }
+        //     } while (err_code == NRF_ERROR_BUSY);
+        // }
+        // if (p_evt->params.rx_data.p_data[p_evt->params.rx_data.length - 1] == '\r')
+        // {
+        //     while (app_uart_put('\n') == NRF_ERROR_BUSY);
+        // }
     }
 
 }
@@ -692,6 +696,24 @@ static void advertising_start(void)
 }
 
 
+APP_TIMER_DEF(test_timer);
+#define TEST_TIMER_PERIOD APP_TIMER_TICKS(500) 
+void TestTimer_TimeOutHander(void * p_context)
+{
+    uint8_t temp[] = "Hello World!";
+    uint16_t len = strlen((char *)temp);
+    uint32_t err_code;
+    UNUSED_PARAMETER(p_context);
+     err_code = ble_nus_data_send(&m_nus, temp, &len, m_conn_handle);
+    if ((err_code != NRF_ERROR_INVALID_STATE) &&
+        (err_code != NRF_ERROR_RESOURCES) &&
+        (err_code != NRF_ERROR_NOT_FOUND))
+    {
+        APP_ERROR_CHECK(err_code);
+    }
+    NRF_LOG_INFO("Test Timer Timeout");
+
+}
 /**@brief Application main function.
  */
 int main(void)
@@ -699,10 +721,10 @@ int main(void)
     bool erase_bonds;
 
     // Initialize.
-    uart_init();
+    // uart_init();
     log_init();
     timers_init();
-    buttons_leds_init(&erase_bonds);
+    // buttons_leds_init(&erase_bonds);
     power_management_init();
     ble_stack_init();
     gap_params_init();
@@ -712,10 +734,11 @@ int main(void)
     conn_params_init();
 
     // Start execution.
-    printf("\r\nUART started.\r\n");
+    // printf("\r\nUART started.\r\n");
     NRF_LOG_INFO("Debug logging for UART over RTT started.");
     advertising_start();
-
+    app_timer_create(&test_timer, APP_TIMER_MODE_REPEATED, TestTimer_TimeOutHander); //单次定时器，所以不需要在回调中关闭
+    app_timer_start(test_timer,TEST_TIMER_PERIOD, NULL);
     // Enter main loop.
     for (;;)
     {
