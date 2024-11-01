@@ -81,7 +81,8 @@
 #include "nrf_log_default_backends.h"
 
 #include "MyLog.h"
-
+#include "MPU6050.h"
+#include "nrf_delay.h"
 
 #define APP_BLE_CONN_CFG_TAG            1                                           /**< A tag identifying the SoftDevice BLE configuration. */
 
@@ -165,11 +166,11 @@ static void gap_params_init(void)
 
     memset(&gap_conn_params, 0, sizeof(gap_conn_params));
 
-    gap_conn_params.min_conn_interval = MIN_CONN_INTERVAL;
-    gap_conn_params.max_conn_interval = MAX_CONN_INTERVAL;
-    gap_conn_params.slave_latency     = SLAVE_LATENCY;
-    gap_conn_params.conn_sup_timeout  = CONN_SUP_TIMEOUT;
-
+    gap_conn_params.min_conn_interval = MIN_CONN_INTERVAL;  // 连接后的连接事件可用的最小间隔时间(7.25ms - 4s)
+    gap_conn_params.max_conn_interval = MAX_CONN_INTERVAL;  // 连接后的连接事件可用的最大间隔时间(7.25ms - 4s)
+    gap_conn_params.slave_latency     = SLAVE_LATENCY;      //从机允许跳过主机发起连接的数目(降功耗，防断连)(可选值0~499)
+    gap_conn_params.conn_sup_timeout  = CONN_SUP_TIMEOUT;   //连接后允许两个设备不通信的最长时间(> (LATENCY+1)*CONN_INTERVAL)(100ms-32s)
+    
     err_code = sd_ble_gap_ppcp_set(&gap_conn_params);
     APP_ERROR_CHECK(err_code);
 }
@@ -341,7 +342,7 @@ static void on_adv_evt(ble_adv_evt_t ble_adv_evt)
     switch (ble_adv_evt)
     {
         case BLE_ADV_EVT_FAST:
-            err_code = bsp_indication_set(BSP_INDICATE_ADVERTISING);
+            // err_code = bsp_indication_set(BSP_INDICATE_ADVERTISING); //开启指示灯
             APP_ERROR_CHECK(err_code);
             break;
         case BLE_ADV_EVT_IDLE:
@@ -696,30 +697,70 @@ static void advertising_start(void)
 }
 
 
-APP_TIMER_DEF(test_timer);
-#define TEST_TIMER_PERIOD APP_TIMER_TICKS(500) 
-void TestTimer_TimeOutHander(void * p_context)
-{
-    uint8_t temp[] = "Hello World!";
-    uint16_t len = strlen((char *)temp);
-    uint32_t err_code;
-    UNUSED_PARAMETER(p_context);
-     err_code = ble_nus_data_send(&m_nus, temp, &len, m_conn_handle);
-    if ((err_code != NRF_ERROR_INVALID_STATE) &&
-        (err_code != NRF_ERROR_RESOURCES) &&
-        (err_code != NRF_ERROR_NOT_FOUND))
-    {
-        APP_ERROR_CHECK(err_code);
-    }
-    NRF_LOG_INFO("Test Timer Timeout");
 
+//***********************MY Macros
+#define MPU_SCAN_TIMER_WAIT_MS         100       //用于mpu延时的定时器周期时间
+#define MPU_SCAN_TIMER_PERIOD_MS       3000     //用于mpu扫描的定时器周期时间
+#define MPU_SKIP_DATA_NUM   3
+#define MPU_SAMPLE_DATA_NUM 2
+//***********************MY Varables
+uint8_t mpu_timer_state = 1;// 0 gap for interpreter to read mpu；1 wait for reseting of mpu
+uint8_t skip_data_num = 0;  //单次beacon广播跳过数据计数
+uint8_t sample_data_num = 0; //单次beacon广播采样数据计数
+APP_TIMER_DEF(mpu_scan_timer);
+short ax,ay,az,gx,gy,gz;  
+//***********************MY Handler 
+void MPU_Int_CallBack_Handler(nrfx_gpiote_pin_t pin, nrf_gpiote_polarity_t action)
+{
+    if(pin == MPU6050_INT_IO)
+    {
+        if(skip_data_num < MPU_SKIP_DATA_NUM)skip_data_num++;
+        else if(sample_data_num < MPU_SAMPLE_DATA_NUM)
+        {
+            if(MPU_Get_Accelerometer(&ax,&ay,&az) == 0)
+            {
+                MY_LOG_INFO("%d times sample:ax-ay-az:%d-%d-%d\r\n",sample_data_num,ax,ay,az);
+
+            }
+            sample_data_num++;
+        }
+        else //单次beacon广播采样数据完毕
+        {
+            skip_data_num = 0;
+            sample_data_num = 0; //计数清零，开始广播
+
+            MPU6050_IntDisable(MPU6050_INT_IO);
+            app_timer_start(mpu_scan_timer,APP_TIMER_TICKS(MPU_SCAN_TIMER_PERIOD_MS),(void*)&mpu_timer_state); 
+            MPU6050_I2C_Disable();
+            nrf_gpio_pin_write(MPU6050_SWITCH_IO,0);
+        }
+    }
+}
+
+void MPU_timer_handler(void * p_context)
+{   
+    uint8_t wait_for_reset = *((uint8_t *)p_context);
+    *((uint8_t *)p_context) = !wait_for_reset; // toggle the state
+    MY_LOG_DEBUG("state = %d",wait_for_reset);
+    if(wait_for_reset)
+    {
+        nrf_gpio_pin_write(MPU6050_SWITCH_IO,1);
+        MPU6050_I2C_Enable();
+        MPU6050_Reset();
+        app_timer_start(mpu_scan_timer,APP_TIMER_TICKS(MPU_SCAN_TIMER_WAIT_MS),p_context);
+    }
+    else 
+    {
+        while(MPU_EnableConf())MY_LOG_DEBUG("mpu init fail!\r\n");
+        MY_LOG_DEBUG("mpu init successfully!\r\n");
+        MPU6050_IntEnable(MPU6050_INT_IO);
+    }
 }
 /**@brief Application main function.
  */
 int main(void)
 {
     bool erase_bonds;
-
     // Initialize.
     // uart_init();
     log_init();
@@ -733,12 +774,19 @@ int main(void)
     advertising_init();
     conn_params_init();
 
-    // Start execution.
-    // printf("\r\nUART started.\r\n");
-    NRF_LOG_INFO("Debug logging for UART over RTT started.");
-    advertising_start();
-    app_timer_create(&test_timer, APP_TIMER_MODE_REPEATED, TestTimer_TimeOutHander); //单次定时器，所以不需要在回调中关闭
-    app_timer_start(test_timer,TEST_TIMER_PERIOD, NULL);
+
+    nrf_gpio_cfg_output(MPU6050_SWITCH_IO);
+    nrf_gpio_pin_write(MPU6050_SWITCH_IO,1);
+    MPU6050_I2C_Init(); 
+    MPU6050_IntInit(MPU6050_INT_IO, MPU_Int_CallBack_Handler);
+    app_timer_create(&mpu_scan_timer,APP_TIMER_MODE_SINGLE_SHOT,MPU_timer_handler);
+    MPU6050_Reset();
+    mpu_timer_state = 0;
+    app_timer_start(mpu_scan_timer,APP_TIMER_TICKS(MPU_SCAN_TIMER_WAIT_MS),(void *)&mpu_timer_state);
+
+
+
+    // advertising_start();
     // Enter main loop.
     for (;;)
     {
