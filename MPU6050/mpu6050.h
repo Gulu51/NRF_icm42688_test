@@ -100,8 +100,8 @@
 
 uint8_t MPU6050_Reset(void);
 uint8_t MPU_EnableConf(void);
-uint8_t MPU_Write_Len(uint8_t addr,uint8_t reg,uint8_t len,uint8_t *buf);//IIC连续写
-uint8_t MPU_Read_Len(uint8_t addr,uint8_t reg,uint8_t len,uint8_t *buf); //IIC连续读 
+uint8_t MPU_Write_Len(uint8_t addr,uint8_t reg,uint16_t len,uint8_t *buf);//IIC连续写
+uint8_t MPU_Read_Len(uint8_t addr,uint8_t reg,uint16_t len,uint8_t *buf); //IIC连续读 
 uint8_t MPU_Write_Byte(uint8_t reg,uint8_t data);				//IIC写一个字节
 uint8_t MPU_Read_Byte(uint8_t reg);						//IIC读一个字节
 
@@ -110,7 +110,9 @@ uint8_t MPU_Set_Accel_Fsr(uint8_t fsr);
 uint8_t MPU_Set_LPF(uint16_t lpf);
 uint8_t MPU_Set_Rate(uint16_t rate);
 uint8_t MPU_Set_Fifo(uint8_t sens);
-
+uint8_t MPU_Get_FifoLen(short *len);
+uint8_t MPU_Get_FifoData(uint8_t *buf,uint16_t len);
+uint8_t MPU_LP_ACCMode(uint8_t rate);
 
 short MPU_Get_Temperature(void);
 uint8_t MPU_Get_Gyroscope(short *gx,short *gy,short *gz);

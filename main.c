@@ -766,21 +766,16 @@ unsigned char remain[1];
 void MPU_Int_CB(nrfx_gpiote_pin_t pin, nrf_gpiote_polarity_t action)
 {
     short status[1] = {0};
+
     res = mpu_get_int_status(status);
     MY_LOG_DEBUG("mpu int res = 0x%x; status:0x%x\r\n",res, status[0]);  
-    // res = mpu_read_fifo(gyro_data,accel_data,NULL,sensor,remain);
-    // if(res != 0) MY_LOG_DEBUG("mpu read fifo fail!");
+
+    // res = mpu_get_accel_reg(accel_data,NULL);
+    // if(res != 0) MY_LOG_DEBUG("mpu read accel fail!");
     // else
     // {
     //     MY_LOG_INFO("acc = %d - %d - %d",accel_data[0],accel_data[1],accel_data[2]);
-    //     MY_LOG_INFO("reamin = %d; sensor = %x",remain[0],sensor[0]);
     // }
-    res = mpu_get_accel_reg(accel_data,NULL);
-    if(res != 0) MY_LOG_DEBUG("mpu read accel fail!");
-    else
-    {
-        MY_LOG_INFO("acc = %d - %d - %d",accel_data[0],accel_data[1],accel_data[2]);
-    }
 }
 
 
@@ -789,7 +784,8 @@ void MPU_Int_CB(nrfx_gpiote_pin_t pin, nrf_gpiote_polarity_t action)
 int main(void)
 {
     bool erase_bonds;
-
+    short len = 0;
+    uint8_t buff[1024] = {0};
     // Initialize.
     // uart_init();
     log_init();
@@ -803,16 +799,36 @@ int main(void)
     advertising_init();
     conn_params_init();
 
-    // nrf_gpio_cfg_output(MPU6050_SWITCH_IO);
-    // nrf_gpio_pin_write(MPU6050_SWITCH_IO,1);
-    // MPU6050_I2C_Init(); 
-    // MPU6050_IntInit(MPU6050_INT_IO, MPU_Int_CallBack_Handler);
+    nrf_gpio_cfg_output(MPU6050_SWITCH_IO);
+    nrf_gpio_pin_write(MPU6050_SWITCH_IO,1);
+    MPU6050_I2C_Init(); 
+    MPU6050_IntInit(MPU6050_INT_IO, MPU_Int_CallBack_Handler);
     // app_timer_create(&mpu_scan_timer,APP_TIMER_MODE_SINGLE_SHOT,MPU_timer_handler);
-    // MPU6050_Reset();
+    MPU6050_Reset();
+    nrf_delay_ms(500);
+    while(MPU_EnableConf())MY_LOG_DEBUG("mpu init fail!\r\n");
+    MY_LOG_DEBUG("mpu init successfully!\r\n");
+    nrf_delay_ms(500);
+    // res = MPU_LP_ACCMode(20);
+    // if(res != 0)MY_LOG_DEBUG("mpu low power acc mode fail!\r\n");
+    if(MPU_Get_FifoLen(&len) == 0)
+    {
+        // MPU_Write_Byte(MPU_USER_CTRL_REG,0x00);	//关闭 fifo
+        MY_LOG_DEBUG("mpu fifo len:%d\r\n",len);
+        MPU_Get_FifoData(buff,len);
+        for(uint16_t i = 0; i < len; i+=6)
+        {
+            MY_LOG_DEBUG("mpu fifo data:%d %d %d \r\n",((buff[i+0]<<8)|buff[i+1]),((buff[i+2]<<8)|buff[i+3]),((buff[i+4]<<8)|buff[i+5]));
+        }
+        // MPU_Write_Byte(MPU_USER_CTRL_REG,0x44);	//重新开启fifo
+        // MPU_Write_Byte(MPU_FIFO_EN_REG,0X08);	//开启ACC入fifo
+    }
+    
     // mpu_timer_state = 0;
     // app_timer_start(mpu_scan_timer,APP_TIMER_TICKS(MPU_SCAN_TIMER_WAIT_MS),(void *)&mpu_timer_state);
 
 
+/*
     nrf_gpio_cfg_output(MPU6050_SWITCH_IO);
     nrf_gpio_pin_write(MPU6050_SWITCH_IO,1);
     MPU6050_IntInit(MPU6050_INT_IO, MPU_Int_CB);
@@ -821,7 +837,6 @@ int main(void)
     nrf_delay_ms(2000);
     res = MPU6050_Reset();
     if(res != 0)MY_LOG_ERROR("mpu init fail!res = %d",res);
-
     // nrf_delay_ms(200);
     // while(MPU_EnableConf())MY_LOG_DEBUG("mpu init fail!\r\n");
     // MY_LOG_DEBUG("mpu init successfully!\r\n");
@@ -833,7 +848,7 @@ int main(void)
     if(res != 0)MY_LOG_DEBUG("mpu lp accel mode fail!");
     // res = mpu_configure_fifo(INV_XYZ_ACCEL); //将三轴加速度压进fifo
     // if(res != 0)MY_LOG_DEBUG("mpu configure fifo fail!");
-
+*/
     // advertising_start();
     // Enter main loop.
     for (;;)

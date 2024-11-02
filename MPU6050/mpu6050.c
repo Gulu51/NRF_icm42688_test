@@ -33,9 +33,12 @@ uint8_t MPU_EnableConf(void)
 	MPU_Set_Gyro_Fsr(3);					//陀螺仪传感器,±2000dps
 	MPU_Set_Accel_Fsr(0);					//加速度传感器,±2g
 	MPU_Set_Rate(50);						//设置采样率50Hz
-	MPU_Write_Byte(MPU_INT_EN_REG,0X01);	//开启数据准备中断
-	MPU_Write_Byte(MPU_USER_CTRL_REG,0X00);	//I2C主模式关闭
-	MPU_Write_Byte(MPU_FIFO_EN_REG,0X00);	//关闭FIFO
+	// MPU_Write_Byte(MPU_INT_EN_REG,0X01);	//开启数据准备中断
+	// MPU_Write_Byte(MPU_USER_CTRL_REG,0X00);	//I2C主模式关闭
+	// MPU_Write_Byte(MPU_FIFO_EN_REG,0X00);	//关闭FIFO
+	MPU_Write_Byte(MPU_INT_EN_REG,0X10);	//fifo满中断
+	MPU_Write_Byte(MPU_USER_CTRL_REG,0X44);	//开启并reset fifo
+	MPU_Write_Byte(MPU_FIFO_EN_REG,0X08);	//关闭FIFO
 	MPU_Write_Byte(MPU_INTBP_CFG_REG,0X40);	//INT引脚低电平触发（推挽）
 	res=MPU_Read_Byte(MPU_DEVICE_ID_REG);
 	if(res==MPU_ADDR)//器件ID正确
@@ -136,6 +139,23 @@ uint8_t MPU_Get_Accelerometer(short *ax,short *ay,short *az)
 	} 	
     return res;;
 }
+
+uint8_t MPU_Get_FifoLen(short *len)
+{
+	uint8_t res = 0;
+	uint8_t temp[2] = {0};
+	res = MPU_Read_Len(MPU_ADDR, MPU_FIFO_CNTH_REG,2,temp);
+	*len = (temp[0] << 8) | temp[1];
+	return res;
+}
+
+uint8_t MPU_Get_FifoData(uint8_t *buf,uint16_t len)
+{
+	uint8_t res = 0;
+	res = MPU_Read_Len(MPU_ADDR, MPU_FIFO_RW_REG,len,buf);
+	return res;
+}
+
 //IIC连续写
 //addr:器件地址 
 //reg:寄存器地址
@@ -143,12 +163,8 @@ uint8_t MPU_Get_Accelerometer(short *ax,short *ay,short *az)
 //buf:数据区
 //返回值:0,正常
 //    其他,错误代码
-#include "MyLog.h"
-uint8_t MPU_Write_Len(uint8_t addr,uint8_t reg,uint8_t len,uint8_t *buf)
+uint8_t MPU_Write_Len(uint8_t addr,uint8_t reg,uint16_t len,uint8_t *buf)
 {
-	MY_LOG_WARNING("address:%x",addr);
-	MY_LOG_WARNING("reg:%x",reg);
-	MY_LOG_WARNING("len:%d",len);
 	return MPU6050_I2C_WriteData(addr, reg, buf, len);	
 } 
 //IIC连续读
@@ -158,7 +174,7 @@ uint8_t MPU_Write_Len(uint8_t addr,uint8_t reg,uint8_t len,uint8_t *buf)
 //buf:读取到的数据存储区
 //返回值:0,正常
 //    其他,错误代码
-uint8_t MPU_Read_Len(uint8_t addr,uint8_t reg,uint8_t len,uint8_t *buf)
+uint8_t MPU_Read_Len(uint8_t addr,uint8_t reg,uint16_t len,uint8_t *buf)
 { 
 	return MPU6050_I2C_ReadData(addr, reg , buf, len);
 }
@@ -181,7 +197,38 @@ uint8_t MPU_Read_Byte(uint8_t reg)
 	return res;		
 }
 
-
+enum lp_acc_rate_e
+{
+    LP_ACC_RATE_1_25HZ,
+    LP_ACC_RATE_5HZ,
+    LP_ACC_RATE_20HZ,
+    LP_ACC_RATE_40HZ
+};
+#define BIT_LPA_CYCLE 0x20
+#define BIT_STBY_XYZG ((0x04) | (0x02) | (0x01))
+uint8_t MPU_LP_ACCMode(uint8_t rate)
+{
+	uint8_t tmp[2] = {0};
+	uint8_t res = 0;
+	if(rate == 0) return -1;
+	tmp[0] = BIT_LPA_CYCLE|0x07;
+    if (rate == 1) {
+        tmp[1] = LP_ACC_RATE_1_25HZ;
+        MPU_Set_LPF(5);
+    } else if (rate <= 5) {
+        tmp[1] = LP_ACC_RATE_5HZ;
+        MPU_Set_LPF(5);
+    } else if (rate <= 20) {
+        tmp[1] = LP_ACC_RATE_20HZ;
+        MPU_Set_LPF(10);
+    } else {
+        tmp[1] = LP_ACC_RATE_40HZ;
+        MPU_Set_LPF(20);
+    }
+    tmp[1] = (tmp[1] << 6) | BIT_STBY_XYZG;
+	res = MPU_Write_Len(MPU_ADDR,MPU_PWR_MGMT1_REG,2,tmp);
+	return res;
+}
 
 
 /* 
