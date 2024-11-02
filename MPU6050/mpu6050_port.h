@@ -20,7 +20,7 @@
 #define MPU6050_TWI_SDA_IO                15       // 数据线引脚   //mini版
 
 #define MPU6050_TWI_MAX_NUM_TX_BYTES            32      // TWI TX buffer size
-#define MPU6050_TWI_TIMEOUT                     10000 
+#define MPU6050_TWI_TIMEOUT                     60000 
 
 /*********************************************************************
  * API FUNCTIONS

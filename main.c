@@ -83,6 +83,7 @@
 #include "MyLog.h"
 #include "MPU6050.h"
 #include "nrf_delay.h"
+#include "inv_mpu.h"
 
 #define APP_BLE_CONN_CFG_TAG            1                                           /**< A tag identifying the SoftDevice BLE configuration. */
 
@@ -756,11 +757,39 @@ void MPU_timer_handler(void * p_context)
         MPU6050_IntEnable(MPU6050_INT_IO);
     }
 }
+
+uint8_t res = 0;
+short gyro_data[3];
+short accel_data[3];
+unsigned char sensor[1];
+unsigned char remain[1]; 
+void MPU_Int_CB(nrfx_gpiote_pin_t pin, nrf_gpiote_polarity_t action)
+{
+    short status[1] = {0};
+    res = mpu_get_int_status(status);
+    MY_LOG_DEBUG("mpu int res = 0x%x; status:0x%x\r\n",res, status[0]);  
+    // res = mpu_read_fifo(gyro_data,accel_data,NULL,sensor,remain);
+    // if(res != 0) MY_LOG_DEBUG("mpu read fifo fail!");
+    // else
+    // {
+    //     MY_LOG_INFO("acc = %d - %d - %d",accel_data[0],accel_data[1],accel_data[2]);
+    //     MY_LOG_INFO("reamin = %d; sensor = %x",remain[0],sensor[0]);
+    // }
+    res = mpu_get_accel_reg(accel_data,NULL);
+    if(res != 0) MY_LOG_DEBUG("mpu read accel fail!");
+    else
+    {
+        MY_LOG_INFO("acc = %d - %d - %d",accel_data[0],accel_data[1],accel_data[2]);
+    }
+}
+
+
 /**@brief Application main function.
  */
 int main(void)
 {
     bool erase_bonds;
+
     // Initialize.
     // uart_init();
     log_init();
@@ -774,17 +803,36 @@ int main(void)
     advertising_init();
     conn_params_init();
 
+    // nrf_gpio_cfg_output(MPU6050_SWITCH_IO);
+    // nrf_gpio_pin_write(MPU6050_SWITCH_IO,1);
+    // MPU6050_I2C_Init(); 
+    // MPU6050_IntInit(MPU6050_INT_IO, MPU_Int_CallBack_Handler);
+    // app_timer_create(&mpu_scan_timer,APP_TIMER_MODE_SINGLE_SHOT,MPU_timer_handler);
+    // MPU6050_Reset();
+    // mpu_timer_state = 0;
+    // app_timer_start(mpu_scan_timer,APP_TIMER_TICKS(MPU_SCAN_TIMER_WAIT_MS),(void *)&mpu_timer_state);
+
 
     nrf_gpio_cfg_output(MPU6050_SWITCH_IO);
     nrf_gpio_pin_write(MPU6050_SWITCH_IO,1);
+    MPU6050_IntInit(MPU6050_INT_IO, MPU_Int_CB);
+    MPU6050_IntEnable(MPU6050_INT_IO);
     MPU6050_I2C_Init(); 
-    MPU6050_IntInit(MPU6050_INT_IO, MPU_Int_CallBack_Handler);
-    app_timer_create(&mpu_scan_timer,APP_TIMER_MODE_SINGLE_SHOT,MPU_timer_handler);
-    MPU6050_Reset();
-    mpu_timer_state = 0;
-    app_timer_start(mpu_scan_timer,APP_TIMER_TICKS(MPU_SCAN_TIMER_WAIT_MS),(void *)&mpu_timer_state);
+    nrf_delay_ms(2000);
+    res = MPU6050_Reset();
+    if(res != 0)MY_LOG_ERROR("mpu init fail!res = %d",res);
 
-
+    // nrf_delay_ms(200);
+    // while(MPU_EnableConf())MY_LOG_DEBUG("mpu init fail!\r\n");
+    // MY_LOG_DEBUG("mpu init successfully!\r\n");
+    res = mpu_init();
+    if(res != 0)MY_LOG_ERROR("mpu init fail!");
+    res = mpu_set_sensors(INV_XYZ_ACCEL);
+    if(res != 0)MY_LOG_ERROR("mpu set sensors fail!");
+    res = mpu_lp_accel_mode(20);
+    if(res != 0)MY_LOG_DEBUG("mpu lp accel mode fail!");
+    // res = mpu_configure_fifo(INV_XYZ_ACCEL); //将三轴加速度压进fifo
+    // if(res != 0)MY_LOG_DEBUG("mpu configure fifo fail!");
 
     // advertising_start();
     // Enter main loop.

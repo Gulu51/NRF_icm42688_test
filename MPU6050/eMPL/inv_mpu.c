@@ -764,49 +764,56 @@ int mpu_read_reg(unsigned char reg, unsigned char *data)
 int mpu_init(void)
 {
     unsigned char data[6], rev;
-
-    /* Reset device. */
-    data[0] = BIT_RESET;
-    if (i2c_write(st.hw->addr, st.reg->pwr_mgmt_1, 1, data))
-        return -1;
-    delay_ms(100);
-
+    /* Reset device. */ 
+    // data[0] = BIT_RESET;
+    // if (i2c_write(st.hw->addr, st.reg->pwr_mgmt_1, 1, data))
+    //     return -1;
+    // data[0] = BIT_RESET;
+    // int res = i2c_write(st.hw->addr, st.reg->pwr_mgmt_1, 1, data);
+    // if (res)
+    // {
+    //     MY_LOG_INFO("addr %x",st.hw->addr);
+    //     MY_LOG_INFO("reset %d",res);
+    //     return -1;
+    // }
+    delay_ms(500);
     /* Wake up chip. */
     data[0] = 0x00;
     if (i2c_write(st.hw->addr, st.reg->pwr_mgmt_1, 1, data))
         return -1;
+    MY_LOG_INFO("wakeup");
 
 #if defined MPU6050
     /* Check product revision. */
-    if (i2c_read(st.hw->addr, st.reg->accel_offs, 6, data))
-        return -1;
-    rev = ((data[5] & 0x01) << 2) | ((data[3] & 0x01) << 1) |
-        (data[1] & 0x01);
+    // if (i2c_read(st.hw->addr, st.reg->accel_offs, 6, data))
+    //     return -1;
+    // rev = ((data[5] & 0x01) << 2) | ((data[3] & 0x01) << 1) |
+    //     (data[1] & 0x01);
 
-    if (rev) {
-        /* Congrats, these parts are better. */
-        if (rev == 1)
-            st.chip_cfg.accel_half = 1;
-        else if (rev == 2)
-            st.chip_cfg.accel_half = 0;
-        else {
-            log_e("Unsupported software product rev %d.\n", rev);
-            return -1;
-        }
-    } else {
-        if (i2c_read(st.hw->addr, st.reg->prod_id, 1, data))
-            return -1;
-        rev = data[0] & 0x0F;
-        if (!rev) {
-            log_e("Product ID read as 0 indicates device is either "
-                "incompatible or an MPU3050.\n");
-            return -1;
-        } else if (rev == 4) {
-            log_i("Half sensitivity part found.\n");
-            st.chip_cfg.accel_half = 1;
-        } else
-            st.chip_cfg.accel_half = 0;
-    }
+    // if (rev) {
+    //     /* Congrats, these parts are better. */
+    //     if (rev == 1)
+    //         st.chip_cfg.accel_half = 1;
+    //     else if (rev == 2)
+    //         st.chip_cfg.accel_half = 0;
+    //     else {
+    //         log_e("Unsupported software product rev %d.\n", rev);
+    //         return -1;
+    //     }
+    // } else {
+    //     if (i2c_read(st.hw->addr, st.reg->prod_id, 1, data))
+    //         return -1;
+    //     rev = data[0] & 0x0F;
+    //     if (!rev) {
+    //         log_e("Product ID read as 0 indicates device is either "
+    //             "incompatible or an MPU3050.\n");
+    //         return -1;
+    //     } else if (rev == 4) {
+    //         log_i("Half sensitivity part found.\n");
+    //         st.chip_cfg.accel_half = 1;
+    //     } else
+    //         st.chip_cfg.accel_half = 0;
+    // }
 #elif defined MPU6500
 #define MPU6500_MEM_REV_ADDR    (0x17)
     if (mpu_read_mem(MPU6500_MEM_REV_ADDR, 1, &rev))
@@ -851,14 +858,19 @@ int mpu_init(void)
 
     if (mpu_set_gyro_fsr(2000))
         return -1;
+    MY_LOG_INFO("set gyro fsr");
     if (mpu_set_accel_fsr(2))
         return -1;
+    MY_LOG_INFO("set acc fsr");
     if (mpu_set_lpf(42))
         return -1;
+    MY_LOG_INFO("set lpf fsr");
     if (mpu_set_sample_rate(50))
         return -1;
+    MY_LOG_INFO("set sample");
     if (mpu_configure_fifo(0))
         return -1;
+    MY_LOG_INFO("set fifo");
 
 //    if (int_param)
 //        reg_int_cb(int_param);
@@ -871,9 +883,11 @@ int mpu_init(void)
     /* Already disabled by setup_compass. */
     if (mpu_set_bypass(0))
         return -1;
+    MY_LOG_INFO("set bypass");
 #endif
 
     mpu_set_sensors(0);
+    MY_LOG_INFO("set sensor 0");
     return 0;
 }
 
@@ -1732,8 +1746,10 @@ int mpu_read_fifo(short *gyro, short *accel, unsigned long *timestamp,
         return -1;
     fifo_count = (data[0] << 8) | data[1];
     if (fifo_count < packet_size)
+    {
+        log_i("FIFO count: %hd\n", fifo_count);
         return 0;
-//    log_i("FIFO count: %hd\n", fifo_count);
+    }
     if (fifo_count > (st.hw->max_fifo >> 1)) {
         /* FIFO is 50% full, better check overflow bit. */
         if (i2c_read(st.hw->addr, st.reg->int_status, 1, data))

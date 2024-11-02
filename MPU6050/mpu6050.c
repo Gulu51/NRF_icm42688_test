@@ -143,8 +143,12 @@ uint8_t MPU_Get_Accelerometer(short *ax,short *ay,short *az)
 //buf:数据区
 //返回值:0,正常
 //    其他,错误代码
+#include "MyLog.h"
 uint8_t MPU_Write_Len(uint8_t addr,uint8_t reg,uint8_t len,uint8_t *buf)
 {
+	MY_LOG_WARNING("address:%x",addr);
+	MY_LOG_WARNING("reg:%x",reg);
+	MY_LOG_WARNING("len:%d",len);
 	return MPU6050_I2C_WriteData(addr, reg, buf, len);	
 } 
 //IIC连续读
