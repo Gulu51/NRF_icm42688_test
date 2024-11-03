@@ -87,7 +87,7 @@
 
 #define APP_BLE_CONN_CFG_TAG            1                                           /**< A tag identifying the SoftDevice BLE configuration. */
 
-#define DEVICE_NAME                     "Nordic_UART"                               /**< Name of device. Will be included in the advertising data. */
+#define DEVICE_NAME                     "IMU_UART"                               /**< Name of device. Will be included in the advertising data. */
 #define NUS_SERVICE_UUID_TYPE           BLE_UUID_TYPE_VENDOR_BEGIN                  /**< UUID type for the Nordic UART Service (vendor specific). */
 
 #define APP_BLE_OBSERVER_PRIO           3                                           /**< Application's BLE observer priority. You shouldn't need to modify this value. */
@@ -344,7 +344,7 @@ static void on_adv_evt(ble_adv_evt_t ble_adv_evt)
     {
         case BLE_ADV_EVT_FAST:
             // err_code = bsp_indication_set(BSP_INDICATE_ADVERTISING); //开启指示灯
-            APP_ERROR_CHECK(err_code);
+            // APP_ERROR_CHECK(err_code);
             break;
         case BLE_ADV_EVT_IDLE:
             sleep_mode_enter();
@@ -524,88 +524,88 @@ void bsp_event_handler(bsp_event_t event)
  *          'new line' '\n' (hex 0x0A) or if the string has reached the maximum data length.
  */
 /**@snippet [Handling the data received over UART] */
-void uart_event_handle(app_uart_evt_t * p_event)
-{
-    static uint8_t data_array[BLE_NUS_MAX_DATA_LEN];
-    static uint8_t index = 0;
-    uint32_t       err_code;
+// void uart_event_handle(app_uart_evt_t * p_event)
+// {
+//     static uint8_t data_array[BLE_NUS_MAX_DATA_LEN];
+//     static uint8_t index = 0;
+//     uint32_t       err_code;
 
-    switch (p_event->evt_type)
-    {
-        case APP_UART_DATA_READY:
-            UNUSED_VARIABLE(app_uart_get(&data_array[index]));
-            index++;
+//     switch (p_event->evt_type)
+//     {
+//         case APP_UART_DATA_READY:
+//             UNUSED_VARIABLE(app_uart_get(&data_array[index]));
+//             index++;
 
-            if ((data_array[index - 1] == '\n') ||
-                (data_array[index - 1] == '\r') ||
-                (index >= m_ble_nus_max_data_len))
-            {
-                if (index > 1)
-                {
-                    NRF_LOG_DEBUG("Ready to send data over BLE NUS");
-                    NRF_LOG_HEXDUMP_DEBUG(data_array, index);
+//             if ((data_array[index - 1] == '\n') ||
+//                 (data_array[index - 1] == '\r') ||
+//                 (index >= m_ble_nus_max_data_len))
+//             {
+//                 if (index > 1)
+//                 {
+//                     NRF_LOG_DEBUG("Ready to send data over BLE NUS");
+//                     NRF_LOG_HEXDUMP_DEBUG(data_array, index);
 
-                    do
-                    {
-                        uint16_t length = (uint16_t)index;
-                        err_code = ble_nus_data_send(&m_nus, data_array, &length, m_conn_handle);
-                        if ((err_code != NRF_ERROR_INVALID_STATE) &&
-                            (err_code != NRF_ERROR_RESOURCES) &&
-                            (err_code != NRF_ERROR_NOT_FOUND))
-                        {
-                            APP_ERROR_CHECK(err_code);
-                        }
-                    } while (err_code == NRF_ERROR_RESOURCES);
-                }
+//                     do
+//                     {
+//                         uint16_t length = (uint16_t)index;
+//                         err_code = ble_nus_data_send(&m_nus, data_array, &length, m_conn_handle);
+//                         if ((err_code != NRF_ERROR_INVALID_STATE) &&
+//                             (err_code != NRF_ERROR_RESOURCES) &&
+//                             (err_code != NRF_ERROR_NOT_FOUND))
+//                         {
+//                             APP_ERROR_CHECK(err_code);
+//                         }
+//                     } while (err_code == NRF_ERROR_RESOURCES);
+//                 }
 
-                index = 0;
-            }
-            break;
+//                 index = 0;
+//             }
+//             break;
 
-        case APP_UART_COMMUNICATION_ERROR:
-            APP_ERROR_HANDLER(p_event->data.error_communication);
-            break;
+//         case APP_UART_COMMUNICATION_ERROR:
+//             APP_ERROR_HANDLER(p_event->data.error_communication);
+//             break;
 
-        case APP_UART_FIFO_ERROR:
-            APP_ERROR_HANDLER(p_event->data.error_code);
-            break;
+//         case APP_UART_FIFO_ERROR:
+//             APP_ERROR_HANDLER(p_event->data.error_code);
+//             break;
 
-        default:
-            break;
-    }
-}
+//         default:
+//             break;
+//     }
+// }
 /**@snippet [Handling the data received over UART] */
 
 
 /**@brief  Function for initializing the UART module.
  */
 /**@snippet [UART Initialization] */
-static void uart_init(void)
-{
-    uint32_t                     err_code;
-    app_uart_comm_params_t const comm_params =
-    {
-        .rx_pin_no    = RX_PIN_NUMBER,
-        .tx_pin_no    = TX_PIN_NUMBER,
-        .rts_pin_no   = RTS_PIN_NUMBER,
-        .cts_pin_no   = CTS_PIN_NUMBER,
-        .flow_control = APP_UART_FLOW_CONTROL_DISABLED,
-        .use_parity   = false,
-#if defined (UART_PRESENT)
-        .baud_rate    = NRF_UART_BAUDRATE_115200
-#else
-        .baud_rate    = NRF_UARTE_BAUDRATE_115200
-#endif
-    };
+// static void uart_init(void)
+// {
+//     uint32_t                     err_code;
+//     app_uart_comm_params_t const comm_params =
+//     {
+//         .rx_pin_no    = RX_PIN_NUMBER,
+//         .tx_pin_no    = TX_PIN_NUMBER,
+//         .rts_pin_no   = RTS_PIN_NUMBER,
+//         .cts_pin_no   = CTS_PIN_NUMBER,
+//         .flow_control = APP_UART_FLOW_CONTROL_DISABLED,
+//         .use_parity   = false,
+// #if defined (UART_PRESENT)
+//         .baud_rate    = NRF_UART_BAUDRATE_115200
+// #else
+//         .baud_rate    = NRF_UARTE_BAUDRATE_115200
+// #endif
+//     };
 
-    APP_UART_FIFO_INIT(&comm_params,
-                       UART_RX_BUF_SIZE,
-                       UART_TX_BUF_SIZE,
-                       uart_event_handle,
-                       APP_IRQ_PRIORITY_LOWEST,
-                       err_code);
-    APP_ERROR_CHECK(err_code);
-}
+//     APP_UART_FIFO_INIT(&comm_params,
+//                        UART_RX_BUF_SIZE,
+//                        UART_TX_BUF_SIZE,
+//                        uart_event_handle,
+//                        APP_IRQ_PRIORITY_LOWEST,
+//                        err_code);
+//     APP_ERROR_CHECK(err_code);
+// }
 /**@snippet [UART Initialization] */
 
 
@@ -641,18 +641,18 @@ static void advertising_init(void)
  *
  * @param[out] p_erase_bonds  Will be true if the clear bonding button was pressed to wake the application up.
  */
-static void buttons_leds_init(bool * p_erase_bonds)
-{
-    bsp_event_t startup_event;
+// static void buttons_leds_init(bool * p_erase_bonds)
+// {
+//     bsp_event_t startup_event;
 
-    uint32_t err_code = bsp_init(BSP_INIT_LEDS | BSP_INIT_BUTTONS, bsp_event_handler);
-    APP_ERROR_CHECK(err_code);
+//     uint32_t err_code = bsp_init(BSP_INIT_LEDS | BSP_INIT_BUTTONS, bsp_event_handler);
+//     APP_ERROR_CHECK(err_code);
 
-    err_code = bsp_btn_ble_init(NULL, &startup_event);
-    APP_ERROR_CHECK(err_code);
+//     err_code = bsp_btn_ble_init(NULL, &startup_event);
+//     APP_ERROR_CHECK(err_code);
 
-    *p_erase_bonds = (startup_event == BSP_EVENT_CLEAR_BONDING_DATA);
-}
+//     *p_erase_bonds = (startup_event == BSP_EVENT_CLEAR_BONDING_DATA);
+// }
 
 
 /**@brief Function for initializing the nrf log module.
@@ -697,99 +697,95 @@ static void advertising_start(void)
     APP_ERROR_CHECK(err_code);
 }
 
+#define SAMPLE_TIME             5  //采样时间5s
+#define SAMPLE_FREQ             20 //采样频率20HZ(1.25/5/20/40四种可选)
+#define SAMPLE_SEND_GAP_TIME    1 //采样到发送(开始广播)的时间间隔 min 
+APP_TIMER_DEF(once_timer); //用于替代延时的单次定时器
+APP_TIMER_DEF(counter_timer); //用于计时的循环定时器
+uint16_t time_counter = 0; //循环计时器中用于计时几秒(s)
+uint8_t res = 0; //返回数据接收
+short accel_data[SAMPLE_TIME*SAMPLE_FREQ][3]; //采样数据buff
+uint16_t index = 0; //数组的index，防止越界
 
-
-//***********************MY Macros
-#define MPU_SCAN_TIMER_WAIT_MS         100       //用于mpu延时的定时器周期时间
-#define MPU_SCAN_TIMER_PERIOD_MS       3000     //用于mpu扫描的定时器周期时间
-#define MPU_SKIP_DATA_NUM   3
-#define MPU_SAMPLE_DATA_NUM 2
-//***********************MY Varables
-uint8_t mpu_timer_state = 1;// 0 gap for interpreter to read mpu；1 wait for reseting of mpu
-uint8_t skip_data_num = 0;  //单次beacon广播跳过数据计数
-uint8_t sample_data_num = 0; //单次beacon广播采样数据计数
-APP_TIMER_DEF(mpu_scan_timer);
-short ax,ay,az,gx,gy,gz;  
-//***********************MY Handler 
-void MPU_Int_CallBack_Handler(nrfx_gpiote_pin_t pin, nrf_gpiote_polarity_t action)
+static void once_timer_handler(void * p_context)
 {
-    if(pin == MPU6050_INT_IO)
+    uint8_t flag = *(uint8_t*)p_context;
+    switch (flag)
     {
-        if(skip_data_num < MPU_SKIP_DATA_NUM)skip_data_num++;
-        else if(sample_data_num < MPU_SAMPLE_DATA_NUM)
-        {
-            if(MPU_Get_Accelerometer(&ax,&ay,&az) == 0)
-            {
-                MY_LOG_INFO("%d times sample:ax-ay-az:%d-%d-%d\r\n",sample_data_num,ax,ay,az);
+        case 0: //第一次延时任务(20ms延时，用于IIC之后稳定外设时序)
+            res = MPU6050_Reset();
+            if(res != 0)MY_LOG_ERROR("mpu init fail!res = %d",res);
+            (*(uint8_t*)p_context)++; //更改标志位的值，方便下次进入执行其他延时任务
+            app_timer_start(once_timer,APP_TIMER_TICKS(100),p_context); //单次计时100ms用于代替延时
+            break;
+        case 1: //第二次延时任务(100ms延时，外设稳定后进行相关设置)
+            res = mpu_init();
+            if(res != 0)MY_LOG_ERROR("mpu init fail!");
+            MY_LOG_DEBUG("mpu init successfully!");
+            
+            res = mpu_set_sensors(INV_XYZ_ACCEL);
+            if(res != 0)MY_LOG_ERROR("mpu set sensors fail!");
+            MY_LOG_DEBUG("mpu set sensors successfully!");
 
-            }
-            sample_data_num++;
-        }
-        else //单次beacon广播采样数据完毕
-        {
-            skip_data_num = 0;
-            sample_data_num = 0; //计数清零，开始广播
-
-            MPU6050_IntDisable(MPU6050_INT_IO);
-            app_timer_start(mpu_scan_timer,APP_TIMER_TICKS(MPU_SCAN_TIMER_PERIOD_MS),(void*)&mpu_timer_state); 
-            MPU6050_I2C_Disable();
-            nrf_gpio_pin_write(MPU6050_SWITCH_IO,0);
-        }
+            res = mpu_lp_accel_mode(SAMPLE_FREQ);
+            if(res != 0)MY_LOG_DEBUG("mpu lp accel mode fail!");
+            MY_LOG_DEBUG("mpu set lpmode successfully!");
+            MPU6050_IntEnable(MPU6050_INT_IO); //开启中断在中断中接收数据
+            break;
+        default: break;
     }
+    res = 1;
 }
 
-void MPU_timer_handler(void * p_context)
-{   
-    uint8_t wait_for_reset = *((uint8_t *)p_context);
-    *((uint8_t *)p_context) = !wait_for_reset; // toggle the state
-    MY_LOG_DEBUG("state = %d",wait_for_reset);
-    if(wait_for_reset)
+void MPU_Int_CallBack(nrfx_gpiote_pin_t pin, nrf_gpiote_polarity_t action)
+{
+    //中断标志位读出是0暂且不管
+    // short status[1] = {0};
+    // res = mpu_get_int_status(status);
+    // MY_LOG_DEBUG("mpu int res = 0x%x; status:0x%x\r\n",res, status[0]);  
+    if(index < SAMPLE_TIME*SAMPLE_FREQ) //buffer not full
     {
-        nrf_gpio_pin_write(MPU6050_SWITCH_IO,1);
-        MPU6050_I2C_Enable();
-        MPU6050_Reset();
-        app_timer_start(mpu_scan_timer,APP_TIMER_TICKS(MPU_SCAN_TIMER_WAIT_MS),p_context);
+        res = mpu_get_accel_reg(accel_data[index],NULL);//读出加速度数据
+        if(res != 0) MY_LOG_DEBUG("mpu read accel fail!");
+        else
+        {
+            MY_LOG_INFO("acc = %d - %d - %d",\
+                    accel_data[index][0],accel_data[index][1],accel_data[index][2]);
+        }
+        index++;
     }
     else 
-    {
-        while(MPU_EnableConf())MY_LOG_DEBUG("mpu init fail!\r\n");
-        MY_LOG_DEBUG("mpu init successfully!\r\n");
-        MPU6050_IntEnable(MPU6050_INT_IO);
+    { //采样结束了
+        MY_LOG_INFO("sample end");
+        MPU6050_IntDisable(MPU6050_INT_IO); //关掉中断，关掉IIC
+        MPU6050_I2C_Disable();
+        nrf_gpio_pin_write(MPU6050_SWITCH_IO,0); //关掉IMU电源
+        //开始循环计数器计时等待时间间隔后开始蓝牙广播(等待主机连接)
+        MY_LOG_INFO("adv start");
+        // app_timer_stop(counter_timer);
+        advertising_start(); //开始广播
+        // app_timer_start(counter_timer,APP_TIMER_TICKS(60*1000),NULL); //1s的循环计数器
     }
 }
 
-uint8_t res = 0;
-short gyro_data[3];
-short accel_data[3];
-unsigned char sensor[1];
-unsigned char remain[1]; 
-void MPU_Int_CB(nrfx_gpiote_pin_t pin, nrf_gpiote_polarity_t action)
+static void counter_timer_handler(void * p_context)
 {
-    short status[1] = {0};
-    res = mpu_get_int_status(status);
-    MY_LOG_DEBUG("mpu int res = 0x%x; status:0x%x\r\n",res, status[0]);  
-    // res = mpu_read_fifo(gyro_data,accel_data,NULL,sensor,remain);
-    // if(res != 0) MY_LOG_DEBUG("mpu read fifo fail!");
-    // else
-    // {
-    //     MY_LOG_INFO("acc = %d - %d - %d",accel_data[0],accel_data[1],accel_data[2]);
-    //     MY_LOG_INFO("reamin = %d; sensor = %x",remain[0],sensor[0]);
-    // }
-    res = mpu_get_accel_reg(accel_data,NULL);
-    if(res != 0) MY_LOG_DEBUG("mpu read accel fail!");
-    else
+    UNUSED_PARAMETER(p_context);
+    time_counter++;
+    if(time_counter == SAMPLE_SEND_GAP_TIME)
     {
-        MY_LOG_INFO("acc = %d - %d - %d",accel_data[0],accel_data[1],accel_data[2]);
+        MY_LOG_INFO("adv start");
+        app_timer_stop(counter_timer);
+        advertising_start(); //开始广播
     }
 }
-
 
 /**@brief Application main function.
  */
 int main(void)
 {
     bool erase_bonds;
-
+    uint8_t task_flag = 0;// 延时任务标志
     // Initialize.
     // uart_init();
     log_init();
@@ -803,36 +799,14 @@ int main(void)
     advertising_init();
     conn_params_init();
 
-    // nrf_gpio_cfg_output(MPU6050_SWITCH_IO);
-    // nrf_gpio_pin_write(MPU6050_SWITCH_IO,1);
-    // MPU6050_I2C_Init(); 
-    // MPU6050_IntInit(MPU6050_INT_IO, MPU_Int_CallBack_Handler);
-    // app_timer_create(&mpu_scan_timer,APP_TIMER_MODE_SINGLE_SHOT,MPU_timer_handler);
-    // MPU6050_Reset();
-    // mpu_timer_state = 0;
-    // app_timer_start(mpu_scan_timer,APP_TIMER_TICKS(MPU_SCAN_TIMER_WAIT_MS),(void *)&mpu_timer_state);
-
-
+    app_timer_create(&once_timer,APP_TIMER_MODE_SINGLE_SHOT,once_timer_handler);
+    app_timer_create(&counter_timer,APP_TIMER_MODE_REPEATED,counter_timer_handler);
+    MPU6050_IntInit(MPU6050_INT_IO,MPU_Int_CallBack);
     nrf_gpio_cfg_output(MPU6050_SWITCH_IO);
     nrf_gpio_pin_write(MPU6050_SWITCH_IO,1);
-    MPU6050_IntInit(MPU6050_INT_IO, MPU_Int_CB);
-    MPU6050_IntEnable(MPU6050_INT_IO);
     MPU6050_I2C_Init(); 
-    nrf_delay_ms(2000);
-    res = MPU6050_Reset();
-    if(res != 0)MY_LOG_ERROR("mpu init fail!res = %d",res);
-
-    // nrf_delay_ms(200);
-    // while(MPU_EnableConf())MY_LOG_DEBUG("mpu init fail!\r\n");
-    // MY_LOG_DEBUG("mpu init successfully!\r\n");
-    res = mpu_init();
-    if(res != 0)MY_LOG_ERROR("mpu init fail!");
-    res = mpu_set_sensors(INV_XYZ_ACCEL);
-    if(res != 0)MY_LOG_ERROR("mpu set sensors fail!");
-    res = mpu_lp_accel_mode(20);
-    if(res != 0)MY_LOG_DEBUG("mpu lp accel mode fail!");
-    // res = mpu_configure_fifo(INV_XYZ_ACCEL); //将三轴加速度压进fifo
-    // if(res != 0)MY_LOG_DEBUG("mpu configure fifo fail!");
+    app_timer_start(once_timer,APP_TIMER_TICKS(20),&task_flag); //单次计时20ms用于代替延时
+    //理论上 软件定时器的最大值为 511,999ms ，即500s左右
 
     // advertising_start();
     // Enter main loop.
