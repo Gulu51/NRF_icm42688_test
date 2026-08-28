@@ -199,6 +199,21 @@ bool icm42688p_power_on(void)
     return true;
 }
 
+bool icm42688p_accel_high_rate_on(void)
+{
+    /* Keep the vibration channel at 200 Hz, but do not pay the gyro cost.
+       PWR_MGMT0: TEMP_DIS=1, GYRO_MODE=OFF, ACCEL_MODE=LOW_NOISE. */
+    icm42688p_set_accel_odr(ODR_200HZ);
+    set_bank(0);
+    if (!icm42688p_write_reg(REG_PWR_MGMT0, 0x23)) {
+        return false;
+    }
+
+    /* Allow the accelerometer output to settle before the sampling timer runs. */
+    nrf_delay_ms(10);
+    return true;
+}
+
 bool icm42688p_power_off(void)
 {
     set_bank(0);
@@ -284,5 +299,31 @@ bool icm42688p_read_data(icm42688p_data_t *p_data)
     p_data->gyro_y  = (float)raw_gyro_y * s_gyro_scale;
     p_data->gyro_z  = (float)raw_gyro_z * s_gyro_scale;
 
+    return true;
+}
+
+bool icm42688p_read_accel(icm42688p_data_t *p_data)
+{
+    uint8_t buf[6] = {0};
+    int16_t raw_acc_x;
+    int16_t raw_acc_y;
+    int16_t raw_acc_z;
+
+    if (!p_data) return false;
+    if (!icm42688p_read_reg(REG_ACCEL_DATA_X1, buf, sizeof(buf))) {
+        return false;
+    }
+
+    raw_acc_x = ((int16_t)buf[0] << 8) | buf[1];
+    raw_acc_y = ((int16_t)buf[2] << 8) | buf[3];
+    raw_acc_z = ((int16_t)buf[4] << 8) | buf[5];
+
+    p_data->acc_x = (float)raw_acc_x * s_accel_scale;
+    p_data->acc_y = (float)raw_acc_y * s_accel_scale;
+    p_data->acc_z = (float)raw_acc_z * s_accel_scale;
+    p_data->gyro_x = 0.0f;
+    p_data->gyro_y = 0.0f;
+    p_data->gyro_z = 0.0f;
+    p_data->temp_c = 0.0f;
     return true;
 }

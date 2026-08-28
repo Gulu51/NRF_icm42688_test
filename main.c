@@ -93,16 +93,16 @@
 
 #define APP_BLE_OBSERVER_PRIO           3                                           /**< Application's BLE observer priority. You shouldn't need to modify this value. */
 
-#define APP_ADV_INTERVAL                1600                                      /**< 1 s advertising interval. */
+#define APP_ADV_INTERVAL                3200                                      /**< 2 s advertising interval. */
 
-#define APP_ADV_DURATION                18000                                       /**< The advertising duration (180 seconds) in units of 10 milliseconds. */
+#define APP_ADV_DURATION                0                                           /**< Advertise slowly until a phone connects. */
 
 #define MIN_CONN_INTERVAL               MSEC_TO_UNITS(500, UNIT_1_25_MS)             /**< Minimum acceptable connection interval (20 ms), Connection interval uses 1.25 ms units. */
 #define MAX_CONN_INTERVAL               MSEC_TO_UNITS(500, UNIT_1_25_MS)             /**< Maximum acceptable connection interval (75 ms), Connection interval uses 1.25 ms units. */
-#define SLAVE_LATENCY                   0                                           /**< Slave latency. */
-#define CONN_SUP_TIMEOUT                MSEC_TO_UNITS(4000, UNIT_10_MS)             /**< Connection supervisory timeout (4 seconds), Supervision Timeout uses 10 ms units. */
-#define FIRST_CONN_PARAMS_UPDATE_DELAY  APP_TIMER_TICKS(5000)                       /**< Time from initiating event (connect or start of notification) to first time sd_ble_gap_conn_param_update is called (5 seconds). */
-#define NEXT_CONN_PARAMS_UPDATE_DELAY   APP_TIMER_TICKS(30000)                      /**< Time between each call to sd_ble_gap_conn_param_update after the first call (30 seconds). */
+#define SLAVE_LATENCY                   4                                           /**< Skip up to four idle connection events. */
+#define CONN_SUP_TIMEOUT                MSEC_TO_UNITS(6000, UNIT_10_MS)             /**< Must exceed 2*(latency+1)*500 ms. */
+#define FIRST_CONN_PARAMS_UPDATE_DELAY  APP_TIMER_TICKS(1000)                       /**< Request low-power parameters shortly after connection. */
+#define NEXT_CONN_PARAMS_UPDATE_DELAY   APP_TIMER_TICKS(10000)                      /**< Retry after 10 seconds. */
 #define MAX_CONN_PARAMS_UPDATE_COUNT    3                                           /**< Number of attempts before giving up the connection parameter negotiation. */
 
 #define DEAD_BEEF                       0xDEADBEEF                                  /**< Value used as error code on stack dump, can be used to identify stack location on stack unwind. */
@@ -134,22 +134,26 @@ static ble_uuid_t m_adv_uuids[]          =                                      
 #define FPU_FPSCR_REG_STACK_OFF          0x40                            //!< Offset of FPSCR register stacked during interrupt handling in FPU part stack
 
 /* Low-power application state machine. */
-#define IMU_SAMPLE_PERIOD_MS            5U
-#define CALIBRATION_TIME_MS              1000U
-#define DATA_SEND_DIVIDER                200U     /* One status report per second. */
-#define STEP_GYRO_THRESHOLD_DPS          35.0f
-#define STEP_GYRO_NEUTRAL_DPS            10.0f
-#define STEP_MIN_SAMPLES                 70U      /* 350 ms at 200 Hz. */
-#define STEP_PHASE_TIMEOUT_SAMPLES       600U     /* Reset an incomplete motion after 3 s. */
+#define IMU_SAMPLE_PERIOD_MS             5U       /* 200 Hz inside a high-rate window. */
+#define TEST_CYCLE_PERIOD_MS             1000U    /* Knee simulator mechanical cycle: 1 Hz. */
+#define HIGH_WINDOW_A_MS                 200U     /* Loading/contact window. */
+#define LOW_GAP_A_MS                     300U
+#define HIGH_WINDOW_B_MS                 200U     /* Unloading/reversal window. */
+#define LOW_GAP_B_MS                     300U
+#define DATA_SEND_EVERY_CYCLES           10U      /* One compact BLE report every 10 cycles. */
 #define GRAVITY_EMA_ALPHA                0.01f
-#define VIBRATION_WINDOW_SAMPLES         200U
+#define VIBRATION_MIN_WINDOW_SAMPLES     20U
 #define VIBRATION_RMS_SQ_THRESHOLD       0.1225f  /* 0.35 g RMS. */
 #define VIBRATION_PEAK_SQ_THRESHOLD      1.44f    /* 1.20 g dynamic peak. */
 #define VIBRATION_ALARM_HOLD_WINDOWS     3U
 
+#if ((HIGH_WINDOW_A_MS + LOW_GAP_A_MS + HIGH_WINDOW_B_MS + LOW_GAP_B_MS) != TEST_CYCLE_PERIOD_MS)
+#error "Phase windows must add up to TEST_CYCLE_PERIOD_MS"
+#endif
+
 typedef enum
 {
-    APP_STATE_BOOT_CALIBRATING,
+    APP_STATE_BOOT,
     APP_STATE_ADVERTISING,
     APP_STATE_CONNECTED_IDLE,
     APP_STATE_STREAMING,
@@ -157,22 +161,16 @@ typedef enum
 } app_state_t;
 
 static volatile bool s_sample_due = false;
+static volatile bool s_phase_due = false;
 static bool          s_sample_timer_running = false;
+static volatile bool s_phase_timer_running = false;
 static volatile bool s_close_requested = false;
 static volatile bool s_start_requested = false;
 static volatile bool s_stop_requested = false;
-static app_state_t   s_app_state = APP_STATE_BOOT_CALIBRATING;
-static uint16_t      s_calibration_samples = 0;
-static uint16_t      s_send_divider = 0;
-static float         s_gyro_bias_x = 0.0f;
-static float         s_gyro_bias_y = 0.0f;
-static float         s_gyro_bias_z = 0.0f;
+static volatile bool s_sync_requested = false;
+static volatile bool s_reset_requested = false;
+static app_state_t   s_app_state = APP_STATE_BOOT;
 static uint32_t      s_step_count = 0;
-static uint32_t      s_last_step_sample = 0;
-static uint32_t      s_step_phase_start = 0;
-static uint8_t       s_step_phase = 0;
-static int8_t        s_step_direction = 0;
-static bool          s_have_previous_step = false;
 static bool          s_gravity_ready = false;
 static float         s_gravity_x = 0.0f;
 static float         s_gravity_y = 0.0f;
@@ -182,15 +180,27 @@ static float         s_vibration_peak_sq = 0.0f;
 static uint16_t      s_vibration_samples = 0;
 static uint8_t       s_vibration_alarm_hold = 0;
 static bool          s_vibration_severe = false;
+static bool          s_status_dirty = false;
+
+typedef enum
+{
+    SENSOR_PHASE_HIGH_A,
+    SENSOR_PHASE_LOW_A,
+    SENSOR_PHASE_HIGH_B,
+    SENSOR_PHASE_LOW_B
+} sensor_phase_t;
+
+static sensor_phase_t s_sensor_phase = SENSOR_PHASE_HIGH_A;
+APP_TIMER_DEF(phase_timer);
 #define TASK_FREQ              100  // 采样任务时间周期，100ms = 10Hz 
 APP_TIMER_DEF(task_timer); 			//用于替代延时的单次定时器
 APP_TIMER_DEF(init_timer); 			//用于计时的循环定时
 uint8_t time_flag = 1;					// 延时任务标志
 static bool s_imu_ok = false;                    // 传感器是否初始化成功
 static volatile bool s_data_ready = false;       // 定时器触发标志
-static uint32_t s_loop_cnt = 0;                  // 主循环计数器
 
 static void advertising_start(void);             // 前置声明
+static void test_schedule_stop(void);
 
 
 
@@ -332,8 +342,8 @@ static void nus_data_handler(ble_nus_evt_t * p_evt)
         length--;
     }
 
-    /* START: acquire and periodically report. STOP: connected idle.
-       CLOSE: stop the service and intentionally disconnect. */
+    /* START begins a phase-aligned 1 Hz bench test. SYNC realigns phase zero.
+       STOP enters connected idle. CLOSE stops and intentionally disconnects. */
     if ((length == 5U) && (memcmp(p_data, "START", 5U) == 0))
     {
         s_start_requested = true;
@@ -341,6 +351,14 @@ static void nus_data_handler(ble_nus_evt_t * p_evt)
     else if ((length == 4U) && (memcmp(p_data, "STOP", 4U) == 0))
     {
         s_stop_requested = true;
+    }
+    else if ((length == 4U) && (memcmp(p_data, "SYNC", 4U) == 0))
+    {
+        s_sync_requested = true;
+    }
+    else if ((length == 5U) && (memcmp(p_data, "RESET", 5U) == 0))
+    {
+        s_reset_requested = true;
     }
     else if ((length == 5U) && (memcmp(p_data, "CLOSE", 5U) == 0))
     {
@@ -492,6 +510,10 @@ static void ble_evt_handler(ble_evt_t const * p_ble_evt, void * p_context)
             err_code = bsp_indication_set(BSP_INDICATE_CONNECTED);
             APP_ERROR_CHECK(err_code);
             m_conn_handle = p_ble_evt->evt.gap_evt.conn_handle;
+            err_code = sd_ble_gap_tx_power_set(BLE_GAP_TX_POWER_ROLE_CONN,
+                                               m_conn_handle,
+                                               TX_POWER_LEVEL);
+            APP_ERROR_CHECK(err_code);
             s_app_state = APP_STATE_CONNECTED_IDLE;
             s_sample_due = false;
             err_code = nrf_ble_qwr_conn_handle_assign(&m_qwr, m_conn_handle);
@@ -501,12 +523,7 @@ static void ble_evt_handler(ble_evt_t const * p_ble_evt, void * p_context)
         case BLE_GAP_EVT_DISCONNECTED:
             NRF_LOG_INFO("Disconnected");
             m_conn_handle = BLE_CONN_HANDLE_INVALID;
-            if (s_sample_timer_running)
-            {
-                APP_ERROR_CHECK(app_timer_stop(task_timer));
-                s_sample_timer_running = false;
-            }
-            (void)icm42688p_power_off();
+            test_schedule_stop();
             s_app_state = APP_STATE_ADVERTISING;
             advertising_start();  // 自动重新广播
             break;
@@ -660,7 +677,7 @@ static void advertising_init(void)
 
     init.advdata.name_type          = BLE_ADVDATA_FULL_NAME;
     init.advdata.include_appearance = false;
-    init.advdata.flags              = BLE_GAP_ADV_FLAGS_LE_ONLY_LIMITED_DISC_MODE;
+    init.advdata.flags              = BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE;
 		init.advdata.p_tx_power_level   = &tx_power_level;
 
     init.srdata.uuids_complete.uuid_cnt = sizeof(m_adv_uuids) / sizeof(m_adv_uuids[0]);
@@ -716,72 +733,97 @@ static void power_management_init(void)
     APP_ERROR_CHECK(err_code);
 }
 
-static void motion_session_reset(void)
+static void sample_timer_start(void)
 {
-    s_step_phase = 0;
-    s_step_direction = 0;
-    s_step_phase_start = s_loop_cnt;
+    if (!s_sample_timer_running)
+    {
+        APP_ERROR_CHECK(app_timer_start(task_timer,
+                                        APP_TIMER_TICKS(IMU_SAMPLE_PERIOD_MS),
+                                        NULL));
+        s_sample_timer_running = true;
+    }
+}
+
+static void sample_timer_stop(void)
+{
+    if (s_sample_timer_running)
+    {
+        APP_ERROR_CHECK(app_timer_stop(task_timer));
+        s_sample_timer_running = false;
+    }
+    s_sample_due = false;
+}
+
+static void phase_timer_start(uint32_t duration_ms)
+{
+    APP_ERROR_CHECK(app_timer_start(phase_timer,
+                                    APP_TIMER_TICKS(duration_ms),
+                                    NULL));
+    s_phase_timer_running = true;
+}
+
+static void phase_timer_stop(void)
+{
+    if (s_phase_timer_running)
+    {
+        APP_ERROR_CHECK(app_timer_stop(phase_timer));
+        s_phase_timer_running = false;
+    }
+    s_phase_due = false;
+}
+
+static void vibration_window_reset(void)
+{
     s_gravity_ready = false;
     s_vibration_energy_sum = 0.0f;
     s_vibration_peak_sq = 0.0f;
     s_vibration_samples = 0;
+}
+
+static void motion_session_reset(void)
+{
+    vibration_window_reset();
     s_vibration_alarm_hold = 0;
     s_vibration_severe = false;
+    s_status_dirty = true;
+}
+
+static void vibration_window_finish(void)
+{
+    bool old_state = s_vibration_severe;
+
+    if (s_vibration_samples >= VIBRATION_MIN_WINDOW_SAMPLES)
+    {
+        bool severe_now =
+            ((s_vibration_energy_sum / (float)s_vibration_samples) >=
+             VIBRATION_RMS_SQ_THRESHOLD) ||
+            (s_vibration_peak_sq >= VIBRATION_PEAK_SQ_THRESHOLD);
+
+        if (severe_now)
+        {
+            s_vibration_alarm_hold = VIBRATION_ALARM_HOLD_WINDOWS;
+        }
+        else if (s_vibration_alarm_hold > 0U)
+        {
+            s_vibration_alarm_hold--;
+        }
+        s_vibration_severe = (s_vibration_alarm_hold > 0U);
+    }
+
+    if (old_state != s_vibration_severe)
+    {
+        s_status_dirty = true;
+    }
+    vibration_window_reset();
 }
 
 static void motion_process(icm42688p_data_t const * p_imu)
 {
-    float gy = p_imu->gyro_y;
     float dx;
     float dy;
     float dz;
     float vibration_sq;
 
-    /* One knee cycle consists of two opposite gyro lobes followed by neutral. */
-    if ((s_step_phase != 0U) &&
-        ((s_loop_cnt - s_step_phase_start) > STEP_PHASE_TIMEOUT_SAMPLES))
-    {
-        s_step_phase = 0;
-        s_step_direction = 0;
-    }
-
-    if (s_step_phase == 0U)
-    {
-        if (gy > STEP_GYRO_THRESHOLD_DPS)
-        {
-            s_step_direction = 1;
-            s_step_phase = 1U;
-            s_step_phase_start = s_loop_cnt;
-        }
-        else if (gy < -STEP_GYRO_THRESHOLD_DPS)
-        {
-            s_step_direction = -1;
-            s_step_phase = 1U;
-            s_step_phase_start = s_loop_cnt;
-        }
-    }
-    else if (s_step_phase == 1U)
-    {
-        if (((s_step_direction > 0) && (gy < -STEP_GYRO_THRESHOLD_DPS)) ||
-            ((s_step_direction < 0) && (gy > STEP_GYRO_THRESHOLD_DPS)))
-        {
-            s_step_phase = 2U;
-        }
-    }
-    else if ((gy > -STEP_GYRO_NEUTRAL_DPS) && (gy < STEP_GYRO_NEUTRAL_DPS))
-    {
-        if (!s_have_previous_step ||
-            ((s_loop_cnt - s_last_step_sample) >= STEP_MIN_SAMPLES))
-        {
-            s_step_count++;
-            s_last_step_sample = s_loop_cnt;
-            s_have_previous_step = true;
-        }
-        s_step_phase = 0U;
-        s_step_direction = 0;
-    }
-
-    /* Remove the gravity/slow posture component, then evaluate dynamic energy. */
     if (!s_gravity_ready)
     {
         s_gravity_x = p_imu->acc_x;
@@ -805,27 +847,93 @@ static void motion_process(icm42688p_data_t const * p_imu)
         s_vibration_peak_sq = vibration_sq;
     }
     s_vibration_samples++;
+}
 
-    if (s_vibration_samples >= VIBRATION_WINDOW_SAMPLES)
+static void ble_send_status(void)
+{
+    char output[24];
+    int len = snprintf(output, sizeof(output),
+                       "S:%lu,V:%u\r\n",
+                       (unsigned long)s_step_count,
+                       s_vibration_severe ? 1U : 0U);
+    ble_send((uint8_t *)output, (uint16_t)len);
+    s_status_dirty = false;
+}
+
+static bool high_window_start(sensor_phase_t phase, uint32_t duration_ms)
+{
+    if (!icm42688p_accel_high_rate_on())
     {
-        bool severe_now =
-            ((s_vibration_energy_sum / (float)s_vibration_samples) >=
-             VIBRATION_RMS_SQ_THRESHOLD) ||
-            (s_vibration_peak_sq >= VIBRATION_PEAK_SQ_THRESHOLD);
+        return false;
+    }
 
-        if (severe_now)
-        {
-            s_vibration_alarm_hold = VIBRATION_ALARM_HOLD_WINDOWS;
-        }
-        else if (s_vibration_alarm_hold > 0U)
-        {
-            s_vibration_alarm_hold--;
-        }
+    s_sensor_phase = phase;
+    vibration_window_reset();
+    sample_timer_start();
+    phase_timer_start(duration_ms);
+    return true;
+}
 
-        s_vibration_severe = (s_vibration_alarm_hold > 0U);
-        s_vibration_energy_sum = 0.0f;
-        s_vibration_peak_sq = 0.0f;
-        s_vibration_samples = 0;
+static void low_gap_start(sensor_phase_t phase, uint32_t duration_ms)
+{
+    sample_timer_stop();
+    vibration_window_finish();
+    (void)icm42688p_power_off();
+    s_sensor_phase = phase;
+    phase_timer_start(duration_ms);
+}
+
+static void test_schedule_stop(void)
+{
+    sample_timer_stop();
+    phase_timer_stop();
+    (void)icm42688p_power_off();
+}
+
+static bool test_schedule_start(void)
+{
+    test_schedule_stop();
+    s_sensor_phase = SENSOR_PHASE_HIGH_A;
+    return high_window_start(SENSOR_PHASE_HIGH_A, HIGH_WINDOW_A_MS);
+}
+
+static void phase_advance(void)
+{
+    switch (s_sensor_phase)
+    {
+        case SENSOR_PHASE_HIGH_A:
+            low_gap_start(SENSOR_PHASE_LOW_A, LOW_GAP_A_MS);
+            break;
+
+        case SENSOR_PHASE_LOW_A:
+            if (!high_window_start(SENSOR_PHASE_HIGH_B, HIGH_WINDOW_B_MS))
+            {
+                test_schedule_stop();
+                s_app_state = APP_STATE_CONNECTED_IDLE;
+            }
+            break;
+
+        case SENSOR_PHASE_HIGH_B:
+            low_gap_start(SENSOR_PHASE_LOW_B, LOW_GAP_B_MS);
+            break;
+
+        case SENSOR_PHASE_LOW_B:
+            s_step_count++;
+            if ((s_step_count % DATA_SEND_EVERY_CYCLES) == 0U)
+            {
+                s_status_dirty = true;
+            }
+            if (!high_window_start(SENSOR_PHASE_HIGH_A, HIGH_WINDOW_A_MS))
+            {
+                test_schedule_stop();
+                s_app_state = APP_STATE_CONNECTED_IDLE;
+            }
+            break;
+
+        default:
+            test_schedule_stop();
+            s_app_state = APP_STATE_CONNECTED_IDLE;
+            break;
     }
 }
 
@@ -839,51 +947,64 @@ static void idle_state_handle(void)
     if (s_start_requested)
     {
         s_start_requested = false;
-        if ((m_conn_handle != BLE_CONN_HANDLE_INVALID) && s_imu_ok &&
-            icm42688p_power_on())
+        if ((m_conn_handle != BLE_CONN_HANDLE_INVALID) && s_imu_ok)
         {
             motion_session_reset();
-            s_app_state = APP_STATE_STREAMING;
-            s_send_divider = 0;
-            s_sample_due = false;
-            if (!s_sample_timer_running)
+            if (test_schedule_start())
             {
-                APP_ERROR_CHECK(app_timer_start(task_timer,
-                                                APP_TIMER_TICKS(IMU_SAMPLE_PERIOD_MS),
-                                                NULL));
-                s_sample_timer_running = true;
+                s_app_state = APP_STATE_STREAMING;
+                ble_send((uint8_t *)"TEST,ON\r\n", 9U);
             }
-            ble_send((uint8_t *)"STREAM,ON\r\n", 11U);
         }
     }
 
     if (s_stop_requested)
     {
         s_stop_requested = false;
-        s_sample_due = false;
-        if (s_sample_timer_running)
-        {
-            APP_ERROR_CHECK(app_timer_stop(task_timer));
-            s_sample_timer_running = false;
-        }
-        (void)icm42688p_power_off();
+        test_schedule_stop();
         s_app_state = APP_STATE_CONNECTED_IDLE;
-        ble_send((uint8_t *)"STREAM,OFF\r\n", 12U);
+        ble_send((uint8_t *)"TEST,OFF\r\n", 10U);
+    }
+
+    if (s_sync_requested)
+    {
+        s_sync_requested = false;
+        if ((s_app_state == APP_STATE_STREAMING) && test_schedule_start())
+        {
+            ble_send((uint8_t *)"SYNC,OK\r\n", 9U);
+        }
+    }
+
+    if (s_reset_requested)
+    {
+        s_reset_requested = false;
+        s_step_count = 0;
+        motion_session_reset();
+        ble_send((uint8_t *)"RESET,OK\r\n", 10U);
     }
 
     if (s_close_requested)
     {
         s_close_requested = false;
-        if (s_sample_timer_running)
-        {
-            APP_ERROR_CHECK(app_timer_stop(task_timer));
-            s_sample_timer_running = false;
-        }
-        (void)icm42688p_power_off();
+        test_schedule_stop();
         if (m_conn_handle != BLE_CONN_HANDLE_INVALID)
         {
             APP_ERROR_CHECK(sd_ble_gap_disconnect(m_conn_handle,
                                                   BLE_HCI_REMOTE_USER_TERMINATED_CONNECTION));
+        }
+    }
+
+    if (s_phase_due)
+    {
+        s_phase_due = false;
+        s_phase_timer_running = false;
+        if (s_app_state == APP_STATE_STREAMING)
+        {
+            phase_advance();
+            if (s_status_dirty)
+            {
+                ble_send_status();
+            }
         }
     }
 
@@ -895,32 +1016,6 @@ static void idle_state_handle(void)
 
     s_sample_due = false;
 
-    /* Calibration is deliberately local: no BLE payload or RTT traffic. */
-    if (s_app_state == APP_STATE_BOOT_CALIBRATING)
-    {
-        icm42688p_data_t discard;
-        if (icm42688p_read_data(&discard))
-        {
-            s_gyro_bias_x += discard.gyro_x;
-            s_gyro_bias_y += discard.gyro_y;
-            s_gyro_bias_z += discard.gyro_z;
-            s_calibration_samples++;
-        }
-        if (s_calibration_samples >= (CALIBRATION_TIME_MS / IMU_SAMPLE_PERIOD_MS))
-        {
-            s_gyro_bias_x /= (float)s_calibration_samples;
-            s_gyro_bias_y /= (float)s_calibration_samples;
-            s_gyro_bias_z /= (float)s_calibration_samples;
-            APP_ERROR_CHECK(app_timer_stop(task_timer));
-            s_sample_timer_running = false;
-            (void)icm42688p_power_off();
-            s_app_state = APP_STATE_ADVERTISING;
-            advertising_start();
-        }
-        nrf_pwr_mgmt_run();
-        return;
-    }
-
     if (s_app_state != APP_STATE_STREAMING)
     {
         nrf_pwr_mgmt_run();
@@ -929,25 +1024,9 @@ static void idle_state_handle(void)
 
     if (s_imu_ok) {
         icm42688p_data_t imu_data;
-        if (icm42688p_read_data(&imu_data)) {
-            imu_data.gyro_x -= s_gyro_bias_x;
-            imu_data.gyro_y -= s_gyro_bias_y;
-            imu_data.gyro_z -= s_gyro_bias_z;
+        if (icm42688p_read_accel(&imu_data)) {
             motion_process(&imu_data);
-
-            /* Sampling stays at 200 Hz; only one compact status is sent per second. */
-            if (++s_send_divider >= DATA_SEND_DIVIDER)
-            {
-                s_send_divider = 0;
-                char output[20];
-                int len = snprintf(output, sizeof(output),
-                                   "S:%lu,V:%u\r\n",
-                                   (unsigned long)s_step_count,
-                                   s_vibration_severe ? 1U : 0U);
-                ble_send((uint8_t *)output, (uint16_t)len);
-            }
         }
-        s_loop_cnt++;
     }
 
     nrf_pwr_mgmt_run();
@@ -969,6 +1048,13 @@ static void task_timer_handler(void * p_context)
     s_sample_due = true;
 }
 
+static void phase_timer_handler(void * p_context)
+{
+    (void)p_context;
+    s_phase_timer_running = false;
+    s_phase_due = true;
+}
+
 static void init_timer_handler(void * p_context)
 {
     (void)p_context;
@@ -981,17 +1067,10 @@ static void init_timer_handler(void * p_context)
         MY_LOG_ERROR("ICM42688P init failed!");
     } else {
         MY_LOG_DEBUG("ICM42688P init success");
-        s_app_state = APP_STATE_BOOT_CALIBRATING;
-        s_calibration_samples = 0;
-        s_gyro_bias_x = 0.0f;
-        s_gyro_bias_y = 0.0f;
-        s_gyro_bias_z = 0.0f;
-        s_sample_due = false;
-        APP_ERROR_CHECK(app_timer_start(task_timer,
-                                        APP_TIMER_TICKS(IMU_SAMPLE_PERIOD_MS),
-                                        NULL));
-        s_sample_timer_running = true;
+        (void)icm42688p_power_off();
     }
+    s_app_state = APP_STATE_ADVERTISING;
+    advertising_start();
 }
 
 
@@ -1026,9 +1105,10 @@ int main(void)
     app_timer_create(&task_timer,APP_TIMER_MODE_REPEATED,task_timer_handler);		 //任务定时器
 		app_timer_create(&init_timer,APP_TIMER_MODE_SINGLE_SHOT,init_timer_handler); //设备初始化
     /* 启动传感器初始化 */
+    app_timer_create(&phase_timer, APP_TIMER_MODE_SINGLE_SHOT, phase_timer_handler);
     app_timer_start(init_timer, APP_TIMER_TICKS(20), &task_flag);
 
-    /* Advertising starts only after the one-second sensor calibration phase. */
+    /* Advertising starts after the IMU identity/configuration check. */
 		
     // Enter main loop.
     for (;;)

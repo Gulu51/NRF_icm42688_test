@@ -102,6 +102,13 @@ bool icm42688p_init(void);
 /**@brief Enable accelerometer and gyroscope in low-noise mode. */
 bool icm42688p_power_on(void);
 
+/**@brief Enable only the accelerometer at 200 Hz in low-noise mode.
+ *
+ * The gyroscope and temperature sensor remain disabled. This mode is intended
+ * for short, phase-synchronised vibration acquisition windows.
+ */
+bool icm42688p_accel_high_rate_on(void);
+
 /**@brief Disable accelerometer and gyroscope while keeping SPI accessible. */
 bool icm42688p_power_off(void);
 
@@ -110,6 +117,9 @@ bool icm42688p_power_off(void);
  * @return true 成功, false 失败
  */
 bool icm42688p_read_data(icm42688p_data_t *p_data);
+
+/**@brief Read only the six accelerometer bytes for low-energy burst sampling. */
+bool icm42688p_read_accel(icm42688p_data_t *p_data);
 
 /**@brief 设置加速度计量程 */
 void icm42688p_set_accel_fs(icm42688p_accel_fs_t fs);
