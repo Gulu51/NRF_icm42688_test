@@ -51,6 +51,7 @@
 
 #include <stdint.h>
 #include <string.h>
+#include <stdio.h>
 #include "nordic_common.h"
 #include "nrf.h"
 #include "ble_hci.h"
@@ -81,23 +82,23 @@
 #include "nrf_log_default_backends.h"
 
 #include "MyLog.h"
-#include "MPU6050.h"
+
 #include "nrf_delay.h"
-#include "inv_mpu.h"
+#include "icm42688p_nrf.h"
 
 #define APP_BLE_CONN_CFG_TAG            1                                           /**< A tag identifying the SoftDevice BLE configuration. */
 
-#define DEVICE_NAME                     "IMU_UART"                               /**< Name of device. Will be included in the advertising data. */
+#define DEVICE_NAME                     "TT_Demo"                               /**< Name of device. Will be included in the advertising data. */
 #define NUS_SERVICE_UUID_TYPE           BLE_UUID_TYPE_VENDOR_BEGIN                  /**< UUID type for the Nordic UART Service (vendor specific). */
 
 #define APP_BLE_OBSERVER_PRIO           3                                           /**< Application's BLE observer priority. You shouldn't need to modify this value. */
 
-#define APP_ADV_INTERVAL                64                                          /**< The advertising interval (in units of 0.625 ms. This value corresponds to 40 ms). */
+#define APP_ADV_INTERVAL                1600                                      /**< 1 s advertising interval. */
 
 #define APP_ADV_DURATION                18000                                       /**< The advertising duration (180 seconds) in units of 10 milliseconds. */
 
-#define MIN_CONN_INTERVAL               MSEC_TO_UNITS(20, UNIT_1_25_MS)             /**< Minimum acceptable connection interval (20 ms), Connection interval uses 1.25 ms units. */
-#define MAX_CONN_INTERVAL               MSEC_TO_UNITS(75, UNIT_1_25_MS)             /**< Maximum acceptable connection interval (75 ms), Connection interval uses 1.25 ms units. */
+#define MIN_CONN_INTERVAL               MSEC_TO_UNITS(500, UNIT_1_25_MS)             /**< Minimum acceptable connection interval (20 ms), Connection interval uses 1.25 ms units. */
+#define MAX_CONN_INTERVAL               MSEC_TO_UNITS(500, UNIT_1_25_MS)             /**< Maximum acceptable connection interval (75 ms), Connection interval uses 1.25 ms units. */
 #define SLAVE_LATENCY                   0                                           /**< Slave latency. */
 #define CONN_SUP_TIMEOUT                MSEC_TO_UNITS(4000, UNIT_10_MS)             /**< Connection supervisory timeout (4 seconds), Supervision Timeout uses 10 ms units. */
 #define FIRST_CONN_PARAMS_UPDATE_DELAY  APP_TIMER_TICKS(5000)                       /**< Time from initiating event (connect or start of notification) to first time sd_ble_gap_conn_param_update is called (5 seconds). */
@@ -109,6 +110,7 @@
 #define UART_TX_BUF_SIZE                256                                         /**< UART TX buffer size. */
 #define UART_RX_BUF_SIZE                256                                         /**< UART RX buffer size. */
 
+#define TX_POWER_LEVEL (-20)
 
 BLE_NUS_DEF(m_nus, NRF_SDH_BLE_TOTAL_LINK_COUNT);                                   /**< BLE NUS service instance. */
 NRF_BLE_GATT_DEF(m_gatt);                                                           /**< GATT module instance. */
@@ -122,6 +124,120 @@ static ble_uuid_t m_adv_uuids[]          =                                      
     {BLE_UUID_NUS_SERVICE, NUS_SERVICE_UUID_TYPE}
 };
 
+/* Private macro -------------------------------------------------------------*/
+
+//#define SAMPLE_TIME             5  //采样时间5s
+//#define SAMPLE_FREQ             5  //采样频率20HZ(1.25/5/20/40四种可选)
+//#define SAMPLE_SEND_GAP_TIME    1  //采样到发送(开始广播)的时间间隔 min 
+
+#define FPU_EXCEPTION_MASK               0x0000009F                      //!< FPU exception mask used to clear exceptions in FPSCR register.
+#define FPU_FPSCR_REG_STACK_OFF          0x40                            //!< Offset of FPSCR register stacked during interrupt handling in FPU part stack
+
+/* Low-power application state machine. */
+#define IMU_SAMPLE_PERIOD_MS            5U
+#define CALIBRATION_TIME_MS              1000U
+#define DATA_SEND_DIVIDER                200U     /* One status report per second. */
+#define STEP_GYRO_THRESHOLD_DPS          35.0f
+#define STEP_GYRO_NEUTRAL_DPS            10.0f
+#define STEP_MIN_SAMPLES                 70U      /* 350 ms at 200 Hz. */
+#define STEP_PHASE_TIMEOUT_SAMPLES       600U     /* Reset an incomplete motion after 3 s. */
+#define GRAVITY_EMA_ALPHA                0.01f
+#define VIBRATION_WINDOW_SAMPLES         200U
+#define VIBRATION_RMS_SQ_THRESHOLD       0.1225f  /* 0.35 g RMS. */
+#define VIBRATION_PEAK_SQ_THRESHOLD      1.44f    /* 1.20 g dynamic peak. */
+#define VIBRATION_ALARM_HOLD_WINDOWS     3U
+
+typedef enum
+{
+    APP_STATE_BOOT_CALIBRATING,
+    APP_STATE_ADVERTISING,
+    APP_STATE_CONNECTED_IDLE,
+    APP_STATE_STREAMING,
+    APP_STATE_SERVICE_OFF
+} app_state_t;
+
+static volatile bool s_sample_due = false;
+static bool          s_sample_timer_running = false;
+static volatile bool s_close_requested = false;
+static volatile bool s_start_requested = false;
+static volatile bool s_stop_requested = false;
+static app_state_t   s_app_state = APP_STATE_BOOT_CALIBRATING;
+static uint16_t      s_calibration_samples = 0;
+static uint16_t      s_send_divider = 0;
+static float         s_gyro_bias_x = 0.0f;
+static float         s_gyro_bias_y = 0.0f;
+static float         s_gyro_bias_z = 0.0f;
+static uint32_t      s_step_count = 0;
+static uint32_t      s_last_step_sample = 0;
+static uint32_t      s_step_phase_start = 0;
+static uint8_t       s_step_phase = 0;
+static int8_t        s_step_direction = 0;
+static bool          s_have_previous_step = false;
+static bool          s_gravity_ready = false;
+static float         s_gravity_x = 0.0f;
+static float         s_gravity_y = 0.0f;
+static float         s_gravity_z = 0.0f;
+static float         s_vibration_energy_sum = 0.0f;
+static float         s_vibration_peak_sq = 0.0f;
+static uint16_t      s_vibration_samples = 0;
+static uint8_t       s_vibration_alarm_hold = 0;
+static bool          s_vibration_severe = false;
+#define TASK_FREQ              100  // 采样任务时间周期，100ms = 10Hz 
+APP_TIMER_DEF(task_timer); 			//用于替代延时的单次定时器
+APP_TIMER_DEF(init_timer); 			//用于计时的循环定时
+uint8_t time_flag = 1;					// 延时任务标志
+static bool s_imu_ok = false;                    // 传感器是否初始化成功
+static volatile bool s_data_ready = false;       // 定时器触发标志
+static uint32_t s_loop_cnt = 0;                  // 主循环计数器
+
+static void advertising_start(void);             // 前置声明
+
+
+
+/**
+
+ * @brief FPU Interrupt handler. Clearing exception flag at the stack.
+
+ *
+
+ * Function clears exception flag in FPSCR register and at the stack. During interrupt handler
+
+ * execution FPU registers might be copied to the stack (see lazy stacking option) and
+
+ * it is necessary to clear data at the stack which will be recovered in the return from
+
+ * interrupt handling.
+
+ */
+
+void FPU_IRQHandler(void)
+{
+
+    // Prepare pointer to stack address with pushed FPSCR register.
+
+    uint32_t * fpscr = (uint32_t * )(FPU->FPCAR + FPU_FPSCR_REG_STACK_OFF);
+
+    // Execute FPU instruction to activate lazy stacking.
+
+    (void)__get_FPSCR();
+
+    // Clear flags in stacked FPSCR register.
+
+    *fpscr = *fpscr & ~(FPU_EXCEPTION_MASK);
+
+}
+
+static void tx_power_set(){
+	ret_code_t err_code = sd_ble_gap_tx_power_set(BLE_GAP_TX_POWER_ROLE_ADV,m_advertising.adv_handle,TX_POWER_LEVEL);
+	APP_ERROR_CHECK(err_code);
+}
+
+void ble_send(uint8_t * string,uint16_t length)
+{
+    if (m_conn_handle == BLE_CONN_HANDLE_INVALID) return;
+    uint32_t err_code = ble_nus_data_send(&m_nus, string, &length, m_conn_handle);
+    (void)err_code;  // 忽略错误，防止 APP_ERROR_CHECK 崩溃
+}
 
 /**@brief Function for assert macro callback.
  *
@@ -157,7 +273,7 @@ static void gap_params_init(void)
     uint32_t                err_code;
     ble_gap_conn_params_t   gap_conn_params;
     ble_gap_conn_sec_mode_t sec_mode;
-
+		
     BLE_GAP_CONN_SEC_MODE_SET_OPEN(&sec_mode);
 
     err_code = sd_ble_gap_device_name_set(&sec_mode,
@@ -200,33 +316,37 @@ static void nrf_qwr_error_handler(uint32_t nrf_error)
 /**@snippet [Handling the data received over BLE] */
 static void nus_data_handler(ble_nus_evt_t * p_evt)
 {
+    /* 初始化已在 main() 中自动启动，此处不再重复触发 */
+    uint8_t const * p_data;
+    uint16_t        length;
 
-    if (p_evt->type == BLE_NUS_EVT_RX_DATA)
+    if (p_evt->type != BLE_NUS_EVT_RX_DATA)
     {
-//        uint32_t err_code;
-        MY_LOG_DEBUG("nus_len = %d",p_evt->params.rx_data.length);
-        SEGGER_RTT_printf(0, p_evt->params.rx_data.p_data);
-        // NRF_LOG_DEBUG("Received data from BLE NUS. Writing data on UART.");
-        // NRF_LOG_HEXDUMP_DEBUG(p_evt->params.rx_data.p_data, p_evt->params.rx_data.length);
-
-        // for (uint32_t i = 0; i < p_evt->params.rx_data.length; i++)
-        // {
-        //     do
-        //     {
-        //         err_code = app_uart_put(p_evt->params.rx_data.p_data[i]);
-        //         if ((err_code != NRF_SUCCESS) && (err_code != NRF_ERROR_BUSY))
-        //         {
-        //             NRF_LOG_ERROR("Failed receiving NUS message. Error 0x%x. ", err_code);
-        //             APP_ERROR_CHECK(err_code);
-        //         }
-        //     } while (err_code == NRF_ERROR_BUSY);
-        // }
-        // if (p_evt->params.rx_data.p_data[p_evt->params.rx_data.length - 1] == '\r')
-        // {
-        //     while (app_uart_put('\n') == NRF_ERROR_BUSY);
-        // }
+        return;
     }
 
+    p_data = p_evt->params.rx_data.p_data;
+    length = p_evt->params.rx_data.length;
+    while ((length > 0U) && ((p_data[length - 1U] == '\r') || (p_data[length - 1U] == '\n')))
+    {
+        length--;
+    }
+
+    /* START: acquire and periodically report. STOP: connected idle.
+       CLOSE: stop the service and intentionally disconnect. */
+    if ((length == 5U) && (memcmp(p_data, "START", 5U) == 0))
+    {
+        s_start_requested = true;
+    }
+    else if ((length == 4U) && (memcmp(p_data, "STOP", 4U) == 0))
+    {
+        s_stop_requested = true;
+    }
+    else if ((length == 5U) && (memcmp(p_data, "CLOSE", 5U) == 0))
+    {
+        s_app_state = APP_STATE_SERVICE_OFF;
+        s_close_requested = true;
+    }
 }
 /**@snippet [Handling the data received over BLE] */
 
@@ -338,7 +458,7 @@ static void sleep_mode_enter(void)
  */
 static void on_adv_evt(ble_adv_evt_t ble_adv_evt)
 {
-    uint32_t err_code;
+//    uint32_t err_code;
 
     switch (ble_adv_evt)
     {
@@ -347,7 +467,8 @@ static void on_adv_evt(ble_adv_evt_t ble_adv_evt)
             // APP_ERROR_CHECK(err_code);
             break;
         case BLE_ADV_EVT_IDLE:
-            sleep_mode_enter();
+            /* 不关机！重新开始广播 */
+            advertising_start();
             break;
         default:
             break;
@@ -371,14 +492,23 @@ static void ble_evt_handler(ble_evt_t const * p_ble_evt, void * p_context)
             err_code = bsp_indication_set(BSP_INDICATE_CONNECTED);
             APP_ERROR_CHECK(err_code);
             m_conn_handle = p_ble_evt->evt.gap_evt.conn_handle;
+            s_app_state = APP_STATE_CONNECTED_IDLE;
+            s_sample_due = false;
             err_code = nrf_ble_qwr_conn_handle_assign(&m_qwr, m_conn_handle);
             APP_ERROR_CHECK(err_code);
             break;
 
         case BLE_GAP_EVT_DISCONNECTED:
             NRF_LOG_INFO("Disconnected");
-            // LED indication will be changed when advertising starts.
             m_conn_handle = BLE_CONN_HANDLE_INVALID;
+            if (s_sample_timer_running)
+            {
+                APP_ERROR_CHECK(app_timer_stop(task_timer));
+                s_sample_timer_running = false;
+            }
+            (void)icm42688p_power_off();
+            s_app_state = APP_STATE_ADVERTISING;
+            advertising_start();  // 自动重新广播
             break;
 
         case BLE_GAP_EVT_PHY_UPDATE_REQUEST:
@@ -517,96 +647,6 @@ void bsp_event_handler(bsp_event_t event)
 }
 
 
-/**@brief   Function for handling app_uart events.
- *
- * @details This function will receive a single character from the app_uart module and append it to
- *          a string. The string will be be sent over BLE when the last character received was a
- *          'new line' '\n' (hex 0x0A) or if the string has reached the maximum data length.
- */
-/**@snippet [Handling the data received over UART] */
-// void uart_event_handle(app_uart_evt_t * p_event)
-// {
-//     static uint8_t data_array[BLE_NUS_MAX_DATA_LEN];
-//     static uint8_t index = 0;
-//     uint32_t       err_code;
-
-//     switch (p_event->evt_type)
-//     {
-//         case APP_UART_DATA_READY:
-//             UNUSED_VARIABLE(app_uart_get(&data_array[index]));
-//             index++;
-
-//             if ((data_array[index - 1] == '\n') ||
-//                 (data_array[index - 1] == '\r') ||
-//                 (index >= m_ble_nus_max_data_len))
-//             {
-//                 if (index > 1)
-//                 {
-//                     NRF_LOG_DEBUG("Ready to send data over BLE NUS");
-//                     NRF_LOG_HEXDUMP_DEBUG(data_array, index);
-
-//                     do
-//                     {
-//                         uint16_t length = (uint16_t)index;
-//                         err_code = ble_nus_data_send(&m_nus, data_array, &length, m_conn_handle);
-//                         if ((err_code != NRF_ERROR_INVALID_STATE) &&
-//                             (err_code != NRF_ERROR_RESOURCES) &&
-//                             (err_code != NRF_ERROR_NOT_FOUND))
-//                         {
-//                             APP_ERROR_CHECK(err_code);
-//                         }
-//                     } while (err_code == NRF_ERROR_RESOURCES);
-//                 }
-
-//                 index = 0;
-//             }
-//             break;
-
-//         case APP_UART_COMMUNICATION_ERROR:
-//             APP_ERROR_HANDLER(p_event->data.error_communication);
-//             break;
-
-//         case APP_UART_FIFO_ERROR:
-//             APP_ERROR_HANDLER(p_event->data.error_code);
-//             break;
-
-//         default:
-//             break;
-//     }
-// }
-/**@snippet [Handling the data received over UART] */
-
-
-/**@brief  Function for initializing the UART module.
- */
-/**@snippet [UART Initialization] */
-// static void uart_init(void)
-// {
-//     uint32_t                     err_code;
-//     app_uart_comm_params_t const comm_params =
-//     {
-//         .rx_pin_no    = RX_PIN_NUMBER,
-//         .tx_pin_no    = TX_PIN_NUMBER,
-//         .rts_pin_no   = RTS_PIN_NUMBER,
-//         .cts_pin_no   = CTS_PIN_NUMBER,
-//         .flow_control = APP_UART_FLOW_CONTROL_DISABLED,
-//         .use_parity   = false,
-// #if defined (UART_PRESENT)
-//         .baud_rate    = NRF_UART_BAUDRATE_115200
-// #else
-//         .baud_rate    = NRF_UARTE_BAUDRATE_115200
-// #endif
-//     };
-
-//     APP_UART_FIFO_INIT(&comm_params,
-//                        UART_RX_BUF_SIZE,
-//                        UART_TX_BUF_SIZE,
-//                        uart_event_handle,
-//                        APP_IRQ_PRIORITY_LOWEST,
-//                        err_code);
-//     APP_ERROR_CHECK(err_code);
-// }
-/**@snippet [UART Initialization] */
 
 
 /**@brief Function for initializing the Advertising functionality.
@@ -615,12 +655,13 @@ static void advertising_init(void)
 {
     uint32_t               err_code;
     ble_advertising_init_t init;
-
+		int8_t tx_power_level = TX_POWER_LEVEL;
     memset(&init, 0, sizeof(init));
 
     init.advdata.name_type          = BLE_ADVDATA_FULL_NAME;
     init.advdata.include_appearance = false;
     init.advdata.flags              = BLE_GAP_ADV_FLAGS_LE_ONLY_LIMITED_DISC_MODE;
+		init.advdata.p_tx_power_level   = &tx_power_level;
 
     init.srdata.uuids_complete.uuid_cnt = sizeof(m_adv_uuids) / sizeof(m_adv_uuids[0]);
     init.srdata.uuids_complete.p_uuids  = m_adv_uuids;
@@ -675,6 +716,119 @@ static void power_management_init(void)
     APP_ERROR_CHECK(err_code);
 }
 
+static void motion_session_reset(void)
+{
+    s_step_phase = 0;
+    s_step_direction = 0;
+    s_step_phase_start = s_loop_cnt;
+    s_gravity_ready = false;
+    s_vibration_energy_sum = 0.0f;
+    s_vibration_peak_sq = 0.0f;
+    s_vibration_samples = 0;
+    s_vibration_alarm_hold = 0;
+    s_vibration_severe = false;
+}
+
+static void motion_process(icm42688p_data_t const * p_imu)
+{
+    float gy = p_imu->gyro_y;
+    float dx;
+    float dy;
+    float dz;
+    float vibration_sq;
+
+    /* One knee cycle consists of two opposite gyro lobes followed by neutral. */
+    if ((s_step_phase != 0U) &&
+        ((s_loop_cnt - s_step_phase_start) > STEP_PHASE_TIMEOUT_SAMPLES))
+    {
+        s_step_phase = 0;
+        s_step_direction = 0;
+    }
+
+    if (s_step_phase == 0U)
+    {
+        if (gy > STEP_GYRO_THRESHOLD_DPS)
+        {
+            s_step_direction = 1;
+            s_step_phase = 1U;
+            s_step_phase_start = s_loop_cnt;
+        }
+        else if (gy < -STEP_GYRO_THRESHOLD_DPS)
+        {
+            s_step_direction = -1;
+            s_step_phase = 1U;
+            s_step_phase_start = s_loop_cnt;
+        }
+    }
+    else if (s_step_phase == 1U)
+    {
+        if (((s_step_direction > 0) && (gy < -STEP_GYRO_THRESHOLD_DPS)) ||
+            ((s_step_direction < 0) && (gy > STEP_GYRO_THRESHOLD_DPS)))
+        {
+            s_step_phase = 2U;
+        }
+    }
+    else if ((gy > -STEP_GYRO_NEUTRAL_DPS) && (gy < STEP_GYRO_NEUTRAL_DPS))
+    {
+        if (!s_have_previous_step ||
+            ((s_loop_cnt - s_last_step_sample) >= STEP_MIN_SAMPLES))
+        {
+            s_step_count++;
+            s_last_step_sample = s_loop_cnt;
+            s_have_previous_step = true;
+        }
+        s_step_phase = 0U;
+        s_step_direction = 0;
+    }
+
+    /* Remove the gravity/slow posture component, then evaluate dynamic energy. */
+    if (!s_gravity_ready)
+    {
+        s_gravity_x = p_imu->acc_x;
+        s_gravity_y = p_imu->acc_y;
+        s_gravity_z = p_imu->acc_z;
+        s_gravity_ready = true;
+        return;
+    }
+
+    s_gravity_x += GRAVITY_EMA_ALPHA * (p_imu->acc_x - s_gravity_x);
+    s_gravity_y += GRAVITY_EMA_ALPHA * (p_imu->acc_y - s_gravity_y);
+    s_gravity_z += GRAVITY_EMA_ALPHA * (p_imu->acc_z - s_gravity_z);
+    dx = p_imu->acc_x - s_gravity_x;
+    dy = p_imu->acc_y - s_gravity_y;
+    dz = p_imu->acc_z - s_gravity_z;
+    vibration_sq = dx * dx + dy * dy + dz * dz;
+
+    s_vibration_energy_sum += vibration_sq;
+    if (vibration_sq > s_vibration_peak_sq)
+    {
+        s_vibration_peak_sq = vibration_sq;
+    }
+    s_vibration_samples++;
+
+    if (s_vibration_samples >= VIBRATION_WINDOW_SAMPLES)
+    {
+        bool severe_now =
+            ((s_vibration_energy_sum / (float)s_vibration_samples) >=
+             VIBRATION_RMS_SQ_THRESHOLD) ||
+            (s_vibration_peak_sq >= VIBRATION_PEAK_SQ_THRESHOLD);
+
+        if (severe_now)
+        {
+            s_vibration_alarm_hold = VIBRATION_ALARM_HOLD_WINDOWS;
+        }
+        else if (s_vibration_alarm_hold > 0U)
+        {
+            s_vibration_alarm_hold--;
+        }
+
+        s_vibration_severe = (s_vibration_alarm_hold > 0U);
+        s_vibration_energy_sum = 0.0f;
+        s_vibration_peak_sq = 0.0f;
+        s_vibration_samples = 0;
+    }
+}
+
 
 /**@brief Function for handling the idle state (main loop).
  *
@@ -682,10 +836,121 @@ static void power_management_init(void)
  */
 static void idle_state_handle(void)
 {
-    if (NRF_LOG_PROCESS() == false)
+    if (s_start_requested)
+    {
+        s_start_requested = false;
+        if ((m_conn_handle != BLE_CONN_HANDLE_INVALID) && s_imu_ok &&
+            icm42688p_power_on())
+        {
+            motion_session_reset();
+            s_app_state = APP_STATE_STREAMING;
+            s_send_divider = 0;
+            s_sample_due = false;
+            if (!s_sample_timer_running)
+            {
+                APP_ERROR_CHECK(app_timer_start(task_timer,
+                                                APP_TIMER_TICKS(IMU_SAMPLE_PERIOD_MS),
+                                                NULL));
+                s_sample_timer_running = true;
+            }
+            ble_send((uint8_t *)"STREAM,ON\r\n", 11U);
+        }
+    }
+
+    if (s_stop_requested)
+    {
+        s_stop_requested = false;
+        s_sample_due = false;
+        if (s_sample_timer_running)
+        {
+            APP_ERROR_CHECK(app_timer_stop(task_timer));
+            s_sample_timer_running = false;
+        }
+        (void)icm42688p_power_off();
+        s_app_state = APP_STATE_CONNECTED_IDLE;
+        ble_send((uint8_t *)"STREAM,OFF\r\n", 12U);
+    }
+
+    if (s_close_requested)
+    {
+        s_close_requested = false;
+        if (s_sample_timer_running)
+        {
+            APP_ERROR_CHECK(app_timer_stop(task_timer));
+            s_sample_timer_running = false;
+        }
+        (void)icm42688p_power_off();
+        if (m_conn_handle != BLE_CONN_HANDLE_INVALID)
+        {
+            APP_ERROR_CHECK(sd_ble_gap_disconnect(m_conn_handle,
+                                                  BLE_HCI_REMOTE_USER_TERMINATED_CONNECTION));
+        }
+    }
+
+    if (!s_sample_due || !s_imu_ok)
     {
         nrf_pwr_mgmt_run();
+        return;
     }
+
+    s_sample_due = false;
+
+    /* Calibration is deliberately local: no BLE payload or RTT traffic. */
+    if (s_app_state == APP_STATE_BOOT_CALIBRATING)
+    {
+        icm42688p_data_t discard;
+        if (icm42688p_read_data(&discard))
+        {
+            s_gyro_bias_x += discard.gyro_x;
+            s_gyro_bias_y += discard.gyro_y;
+            s_gyro_bias_z += discard.gyro_z;
+            s_calibration_samples++;
+        }
+        if (s_calibration_samples >= (CALIBRATION_TIME_MS / IMU_SAMPLE_PERIOD_MS))
+        {
+            s_gyro_bias_x /= (float)s_calibration_samples;
+            s_gyro_bias_y /= (float)s_calibration_samples;
+            s_gyro_bias_z /= (float)s_calibration_samples;
+            APP_ERROR_CHECK(app_timer_stop(task_timer));
+            s_sample_timer_running = false;
+            (void)icm42688p_power_off();
+            s_app_state = APP_STATE_ADVERTISING;
+            advertising_start();
+        }
+        nrf_pwr_mgmt_run();
+        return;
+    }
+
+    if (s_app_state != APP_STATE_STREAMING)
+    {
+        nrf_pwr_mgmt_run();
+        return;
+    }
+
+    if (s_imu_ok) {
+        icm42688p_data_t imu_data;
+        if (icm42688p_read_data(&imu_data)) {
+            imu_data.gyro_x -= s_gyro_bias_x;
+            imu_data.gyro_y -= s_gyro_bias_y;
+            imu_data.gyro_z -= s_gyro_bias_z;
+            motion_process(&imu_data);
+
+            /* Sampling stays at 200 Hz; only one compact status is sent per second. */
+            if (++s_send_divider >= DATA_SEND_DIVIDER)
+            {
+                s_send_divider = 0;
+                char output[20];
+                int len = snprintf(output, sizeof(output),
+                                   "S:%lu,V:%u\r\n",
+                                   (unsigned long)s_step_count,
+                                   s_vibration_severe ? 1U : 0U);
+                ble_send((uint8_t *)output, (uint16_t)len);
+            }
+        }
+        s_loop_cnt++;
+    }
+
+    nrf_pwr_mgmt_run();
 }
 
 
@@ -697,118 +962,74 @@ static void advertising_start(void)
     APP_ERROR_CHECK(err_code);
 }
 
-#define SAMPLE_TIME             5  //采样时间5s
-#define SAMPLE_FREQ             20 //采样频率20HZ(1.25/5/20/40四种可选)
-#define SAMPLE_SEND_GAP_TIME    1 //采样到发送(开始广播)的时间间隔 min 
-APP_TIMER_DEF(once_timer); //用于替代延时的单次定时器
-APP_TIMER_DEF(counter_timer); //用于计时的循环定时器
-uint16_t time_counter = 0; //循环计时器中用于计时几秒(s)
-uint8_t res = 0; //返回数据接收
-short accel_data[SAMPLE_TIME*SAMPLE_FREQ][3]; //采样数据buff
-uint16_t index = 0; //数组的index，防止越界
 
-static void once_timer_handler(void * p_context)
+static void task_timer_handler(void * p_context)
 {
-    uint8_t flag = *(uint8_t*)p_context;
-    switch (flag)
-    {
-        case 0: //第一次延时任务(20ms延时，用于IIC之后稳定外设时序)
-            res = MPU6050_Reset();
-            if(res != 0)MY_LOG_ERROR("mpu init fail!res = %d",res);
-            (*(uint8_t*)p_context)++; //更改标志位的值，方便下次进入执行其他延时任务
-            app_timer_start(once_timer,APP_TIMER_TICKS(100),p_context); //单次计时100ms用于代替延时
-            break;
-        case 1: //第二次延时任务(100ms延时，外设稳定后进行相关设置)
-            res = mpu_init();
-            if(res != 0)MY_LOG_ERROR("mpu init fail!");
-            MY_LOG_DEBUG("mpu init successfully!");
-            
-            res = mpu_set_sensors(INV_XYZ_ACCEL);
-            if(res != 0)MY_LOG_ERROR("mpu set sensors fail!");
-            MY_LOG_DEBUG("mpu set sensors successfully!");
-
-            res = mpu_lp_accel_mode(SAMPLE_FREQ);
-            if(res != 0)MY_LOG_DEBUG("mpu lp accel mode fail!");
-            MY_LOG_DEBUG("mpu set lpmode successfully!");
-            MPU6050_IntEnable(MPU6050_INT_IO); //开启中断在中断中接收数据
-            break;
-        default: break;
-    }
-    res = 1;
+    (void)p_context;
+    s_sample_due = true;
 }
 
-void MPU_Int_CallBack(nrfx_gpiote_pin_t pin, nrf_gpiote_polarity_t action)
+static void init_timer_handler(void * p_context)
 {
-    //中断标志位读出是0暂且不管
-    // short status[1] = {0};
-    // res = mpu_get_int_status(status);
-    // MY_LOG_DEBUG("mpu int res = 0x%x; status:0x%x\r\n",res, status[0]);  
-    if(index < SAMPLE_TIME*SAMPLE_FREQ) //buffer not full
-    {
-        res = mpu_get_accel_reg(accel_data[index],NULL);//读出加速度数据
-        if(res != 0) MY_LOG_DEBUG("mpu read accel fail!");
-        else
-        {
-            MY_LOG_INFO("acc = %d - %d - %d",\
-                    accel_data[index][0],accel_data[index][1],accel_data[index][2]);
-        }
-        index++;
-    }
-    else 
-    { //采样结束了
-        MY_LOG_INFO("sample end");
-        MPU6050_IntDisable(MPU6050_INT_IO); //关掉中断，关掉IIC
-        MPU6050_I2C_Disable();
-        nrf_gpio_pin_write(MPU6050_SWITCH_IO,0); //关掉IMU电源
-        //开始循环计数器计时等待时间间隔后开始蓝牙广播(等待主机连接)
-        MY_LOG_INFO("adv start");
-        // app_timer_stop(counter_timer);
-        advertising_start(); //开始广播
-        // app_timer_start(counter_timer,APP_TIMER_TICKS(60*1000),NULL); //1s的循环计数器
+    (void)p_context;
+    /* 初始化 SPI 和传感器 (单次执行) */
+    icm42688p_spi_init();
+    nrf_delay_ms(10);
+
+    s_imu_ok = icm42688p_init();
+    if (!s_imu_ok) {
+        MY_LOG_ERROR("ICM42688P init failed!");
+    } else {
+        MY_LOG_DEBUG("ICM42688P init success");
+        s_app_state = APP_STATE_BOOT_CALIBRATING;
+        s_calibration_samples = 0;
+        s_gyro_bias_x = 0.0f;
+        s_gyro_bias_y = 0.0f;
+        s_gyro_bias_z = 0.0f;
+        s_sample_due = false;
+        APP_ERROR_CHECK(app_timer_start(task_timer,
+                                        APP_TIMER_TICKS(IMU_SAMPLE_PERIOD_MS),
+                                        NULL));
+        s_sample_timer_running = true;
     }
 }
 
-static void counter_timer_handler(void * p_context)
-{
-    UNUSED_PARAMETER(p_context);
-    time_counter++;
-    if(time_counter == SAMPLE_SEND_GAP_TIME)
-    {
-        MY_LOG_INFO("adv start");
-        app_timer_stop(counter_timer);
-        advertising_start(); //开始广播
-    }
-}
+
 
 /**@brief Application main function.
  */
 int main(void)
 {
-    bool erase_bonds;
-    uint8_t task_flag = 0;// 延时任务标志
+		// 关闭FPU计算单元
+		__set_FPSCR(__get_FPSCR() & ~(FPU_EXCEPTION_MASK));
+		(void) __get_FPSCR();
+		NVIC_ClearPendingIRQ(FPU_IRQn);
+	
     // Initialize.
     // uart_init();
-    log_init();
-    timers_init();
+		// log_init();
     // buttons_leds_init(&erase_bonds);
-    power_management_init();
+	
+		//蓝牙协议栈初始化
+    power_management_init(); 
+		NRF_POWER->DCDCEN = 1;   //使用内部DCDC供电
     ble_stack_init();
     gap_params_init();
     gatt_init();
     services_init();
     advertising_init();
     conn_params_init();
+		tx_power_set(); 				 //设置蓝牙射频发送功率
+		uint8_t task_flag=0;
+		//定时器初始化，理论上 软件定时器的最大值为 511,999ms ，即500s左右
+		timers_init();
+    app_timer_create(&task_timer,APP_TIMER_MODE_REPEATED,task_timer_handler);		 //任务定时器
+		app_timer_create(&init_timer,APP_TIMER_MODE_SINGLE_SHOT,init_timer_handler); //设备初始化
+    /* 启动传感器初始化 */
+    app_timer_start(init_timer, APP_TIMER_TICKS(20), &task_flag);
 
-    app_timer_create(&once_timer,APP_TIMER_MODE_SINGLE_SHOT,once_timer_handler);
-    app_timer_create(&counter_timer,APP_TIMER_MODE_REPEATED,counter_timer_handler);
-    MPU6050_IntInit(MPU6050_INT_IO,MPU_Int_CallBack);
-    nrf_gpio_cfg_output(MPU6050_SWITCH_IO);
-    nrf_gpio_pin_write(MPU6050_SWITCH_IO,1);
-    MPU6050_I2C_Init(); 
-    app_timer_start(once_timer,APP_TIMER_TICKS(20),&task_flag); //单次计时20ms用于代替延时
-    //理论上 软件定时器的最大值为 511,999ms ，即500s左右
-
-    // advertising_start();
+    /* Advertising starts only after the one-second sensor calibration phase. */
+		
     // Enter main loop.
     for (;;)
     {

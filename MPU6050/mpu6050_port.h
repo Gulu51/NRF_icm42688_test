@@ -5,6 +5,11 @@
  */
 #include "stdint.h"
 #include "nrf_drv_gpiote.h"
+#include "lis2dw12_reg.h"
+#include "nrf_log.h"
+#include "nrf_log_ctrl.h"
+#include "nrf_log_default_backends.h"
+#include "MyLog.h"
 /*********************************************************************
  * DEFINITIONS
  */
@@ -16,12 +21,13 @@
 // #define MPU6050_TWI_SCL_IO                15       // 时钟线引脚  
 // #define MPU6050_TWI_SDA_IO                16       // 数据线引脚  //测试版
 
-#define MPU6050_TWI_SCL_IO                16       // 时钟线引脚  
-#define MPU6050_TWI_SDA_IO                15       // 数据线引脚   //mini版
+#define MPU6050_TWI_SCL_IO                25       // 时钟线引脚  
+#define MPU6050_TWI_SDA_IO                27       // 数据线引脚   //mini版
 
 #define MPU6050_TWI_MAX_NUM_TX_BYTES            32      // TWI TX buffer size
 #define MPU6050_TWI_TIMEOUT                     60000 
-
+#define BOOT_TIME            20 //ms
+#define SENSOR_BUS  &s_twiHandle  // I2C版本
 /*********************************************************************
  * API FUNCTIONS
  */
@@ -33,5 +39,14 @@ void MPU6050_I2C_Disable(void);
 void MPU6050_IntInit(uint32_t pin,nrfx_gpiote_evt_handler_t callback);
 void MPU6050_IntEnable(uint32_t pin);
 void MPU6050_IntDisable(uint32_t pin);
+static int32_t platform_write(void *handle, uint8_t reg, const uint8_t *bufp,
+                             uint16_t len);
+static int32_t platform_read(void *handle, uint8_t reg, uint8_t *bufp,
+                            uint16_t len);
+void platform_delay(uint32_t ms);
+void platform_init(void);
+void lis2dw12_init(void);
+
+void minimal_test(void);
 
 #endif

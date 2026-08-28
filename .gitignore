@@ -1,2 +1,22 @@
-!/pca10040/s132/arm5_no_packs/_build/nrf52832_xxaa.hex
-/pca10040/s132/arm5_no_packs/
+# Keil build output and generated runtime files.
+/pca10040/s132/arm5_no_packs/_build/
+/pca10040/s132/arm5_no_packs/RTE/
+/pca10040/s132/arm5_no_packs/.vscode/
+
+# Keil per-user state and debugger logs.
+*.uvguix
+*.uvguix.*
+JLinkLog.txt
+JLinkSettings.ini
+
+# Compiler intermediates and local logs.
+*.log
+*.o
+*.obj
+*.axf
+*.elf
+*.map
+*.lst
+*.crf
+*.d
+*.dep
