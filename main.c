@@ -141,6 +141,7 @@ static ble_uuid_t m_adv_uuids[]          =                                      
 #define HIGH_WINDOW_B_MS                 200U     /* Unloading/reversal window. */
 #define LOW_GAP_B_MS                     300U
 #define DATA_SEND_EVERY_CYCLES           10U      /* One compact BLE report every 10 cycles. */
+#define STEP_GYRO_THRESHOLD_DPS          35.0f    /* Opposite Y-axis lobes identify one step. */
 #define GRAVITY_EMA_ALPHA                0.01f
 #define VIBRATION_MIN_WINDOW_SAMPLES     20U
 #define VIBRATION_RMS_SQ_THRESHOLD       0.1225f  /* 0.35 g RMS. */
@@ -171,6 +172,9 @@ static volatile bool s_sync_requested = false;
 static volatile bool s_reset_requested = false;
 static app_state_t   s_app_state = APP_STATE_BOOT;
 static uint32_t      s_step_count = 0;
+static uint32_t      s_test_cycle_count = 0;
+static bool          s_cycle_positive_lobe = false;
+static bool          s_cycle_negative_lobe = false;
 static bool          s_gravity_ready = false;
 static float         s_gravity_x = 0.0f;
 static float         s_gravity_y = 0.0f;
@@ -783,6 +787,8 @@ static void vibration_window_reset(void)
 static void motion_session_reset(void)
 {
     vibration_window_reset();
+    s_cycle_positive_lobe = false;
+    s_cycle_negative_lobe = false;
     s_vibration_alarm_hold = 0;
     s_vibration_severe = false;
     s_status_dirty = true;
@@ -824,6 +830,15 @@ static void motion_process(icm42688p_data_t const * p_imu)
     float dz;
     float vibration_sq;
 
+    if (p_imu->gyro_y > STEP_GYRO_THRESHOLD_DPS)
+    {
+        s_cycle_positive_lobe = true;
+    }
+    else if (p_imu->gyro_y < -STEP_GYRO_THRESHOLD_DPS)
+    {
+        s_cycle_negative_lobe = true;
+    }
+
     if (!s_gravity_ready)
     {
         s_gravity_x = p_imu->acc_x;
@@ -862,15 +877,19 @@ static void ble_send_status(void)
 
 static bool high_window_start(sensor_phase_t phase, uint32_t duration_ms)
 {
-    if (!icm42688p_accel_high_rate_on())
+    s_sensor_phase = phase;
+    vibration_window_reset();
+
+    /* Start the phase clock before the gyro warm-up delay so the mechanical
+       cycle remains 1 Hz instead of accumulating 50 ms drift per window. */
+    phase_timer_start(duration_ms);
+    if (!icm42688p_motion_high_rate_on())
     {
+        phase_timer_stop();
         return false;
     }
 
-    s_sensor_phase = phase;
-    vibration_window_reset();
     sample_timer_start();
-    phase_timer_start(duration_ms);
     return true;
 }
 
@@ -918,8 +937,14 @@ static void phase_advance(void)
             break;
 
         case SENSOR_PHASE_LOW_B:
-            s_step_count++;
-            if ((s_step_count % DATA_SEND_EVERY_CYCLES) == 0U)
+            s_test_cycle_count++;
+            if (s_cycle_positive_lobe && s_cycle_negative_lobe)
+            {
+                s_step_count++;
+            }
+            s_cycle_positive_lobe = false;
+            s_cycle_negative_lobe = false;
+            if ((s_test_cycle_count % DATA_SEND_EVERY_CYCLES) == 0U)
             {
                 s_status_dirty = true;
             }
@@ -979,6 +1004,7 @@ static void idle_state_handle(void)
     {
         s_reset_requested = false;
         s_step_count = 0;
+        s_test_cycle_count = 0;
         motion_session_reset();
         ble_send((uint8_t *)"RESET,OK\r\n", 10U);
     }
@@ -1024,7 +1050,7 @@ static void idle_state_handle(void)
 
     if (s_imu_ok) {
         icm42688p_data_t imu_data;
-        if (icm42688p_read_accel(&imu_data)) {
+        if (icm42688p_read_motion(&imu_data)) {
             motion_process(&imu_data);
         }
     }

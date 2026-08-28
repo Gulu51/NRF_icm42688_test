@@ -214,6 +214,21 @@ bool icm42688p_accel_high_rate_on(void)
     return true;
 }
 
+bool icm42688p_motion_high_rate_on(void)
+{
+    icm42688p_set_accel_odr(ODR_200HZ);
+    icm42688p_set_gyro_odr(ODR_200HZ);
+    set_bank(0);
+    /* PWR_MGMT0: TEMP_DIS=1, GYRO_MODE=LN, ACCEL_MODE=LN. */
+    if (!icm42688p_write_reg(REG_PWR_MGMT0, 0x2F)) {
+        return false;
+    }
+
+    /* The gyroscope needs about 45 ms before its samples are usable. */
+    nrf_delay_ms(50);
+    return true;
+}
+
 bool icm42688p_power_off(void)
 {
     set_bank(0);
@@ -324,6 +339,38 @@ bool icm42688p_read_accel(icm42688p_data_t *p_data)
     p_data->gyro_x = 0.0f;
     p_data->gyro_y = 0.0f;
     p_data->gyro_z = 0.0f;
+    p_data->temp_c = 0.0f;
+    return true;
+}
+
+bool icm42688p_read_motion(icm42688p_data_t *p_data)
+{
+    uint8_t buf[12] = {0};
+    int16_t raw_acc_x;
+    int16_t raw_acc_y;
+    int16_t raw_acc_z;
+    int16_t raw_gyro_x;
+    int16_t raw_gyro_y;
+    int16_t raw_gyro_z;
+
+    if (!p_data) return false;
+    if (!icm42688p_read_reg(REG_ACCEL_DATA_X1, buf, sizeof(buf))) {
+        return false;
+    }
+
+    raw_acc_x  = ((int16_t)buf[0]  << 8) | buf[1];
+    raw_acc_y  = ((int16_t)buf[2]  << 8) | buf[3];
+    raw_acc_z  = ((int16_t)buf[4]  << 8) | buf[5];
+    raw_gyro_x = ((int16_t)buf[6]  << 8) | buf[7];
+    raw_gyro_y = ((int16_t)buf[8]  << 8) | buf[9];
+    raw_gyro_z = ((int16_t)buf[10] << 8) | buf[11];
+
+    p_data->acc_x  = (float)raw_acc_x * s_accel_scale;
+    p_data->acc_y  = (float)raw_acc_y * s_accel_scale;
+    p_data->acc_z  = (float)raw_acc_z * s_accel_scale;
+    p_data->gyro_x = (float)raw_gyro_x * s_gyro_scale;
+    p_data->gyro_y = (float)raw_gyro_y * s_gyro_scale;
+    p_data->gyro_z = (float)raw_gyro_z * s_gyro_scale;
     p_data->temp_c = 0.0f;
     return true;
 }

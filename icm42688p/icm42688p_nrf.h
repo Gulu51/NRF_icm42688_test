@@ -109,6 +109,12 @@ bool icm42688p_power_on(void);
  */
 bool icm42688p_accel_high_rate_on(void);
 
+/**@brief Enable accelerometer and gyroscope at 200 Hz for a short motion window.
+ *
+ * The temperature sensor remains disabled.
+ */
+bool icm42688p_motion_high_rate_on(void);
+
 /**@brief Disable accelerometer and gyroscope while keeping SPI accessible. */
 bool icm42688p_power_off(void);
 
@@ -120,6 +126,9 @@ bool icm42688p_read_data(icm42688p_data_t *p_data);
 
 /**@brief Read only the six accelerometer bytes for low-energy burst sampling. */
 bool icm42688p_read_accel(icm42688p_data_t *p_data);
+
+/**@brief Read accelerometer and gyroscope without transferring temperature. */
+bool icm42688p_read_motion(icm42688p_data_t *p_data);
 
 /**@brief 设置加速度计量程 */
 void icm42688p_set_accel_fs(icm42688p_accel_fs_t fs);
