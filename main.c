@@ -137,9 +137,11 @@ static ble_uuid_t m_adv_uuids[]          =                                      
 #define IMU_SAMPLE_PERIOD_MS             20U
 #define STATUS_REPORT_PERIOD_SAMPLES     250U     /* At most one routine BLE report every 5 seconds. */
 #define GRAVITY_EMA_ALPHA                0.01f
-#define STEP_GYRO_THRESHOLD_DPS          25.0f    /* Both halves of a movement must cross this. */
+#define STEP_GYRO_THRESHOLD_DPS          40.0f    /* Reject small wrist jitter and gyro noise. */
+#define STEP_CONFIRM_SAMPLES             3U       /* Direction must persist for 60 ms. */
+#define STEP_MIN_REVERSAL_SAMPLES        5U       /* Reject a sign spike sooner than 100 ms. */
 #define STEP_GYRO_TIMEOUT_SAMPLES        75U      /* Opposite direction must arrive within 1.5 s. */
-#define STEP_REFRACTORY_SAMPLES          5U       /* 100 ms after a completed movement. */
+#define STEP_REFRACTORY_SAMPLES          12U      /* 240 ms after a completed movement. */
 #define VIBRATION_WINDOW_SAMPLES         50U      /* One-second accelerometer window at 50 Hz. */
 #define VIBRATION_RMS_SQ_THRESHOLD       0.1225f  /* 0.35 g RMS. */
 #define VIBRATION_PEAK_SQ_THRESHOLD      1.44f    /* 1.20 g dynamic peak. */
@@ -164,6 +166,10 @@ static app_state_t   s_app_state = APP_STATE_BOOT;
 static uint32_t      s_step_count = 0;
 static int8_t        s_step_axis = -1;
 static int8_t        s_step_first_sign = 0;
+static int8_t        s_step_candidate_axis = -1;
+static int8_t        s_step_candidate_sign = 0;
+static uint8_t       s_step_candidate_samples = 0;
+static uint8_t       s_step_opposite_samples = 0;
 static uint8_t       s_step_timeout_samples = 0;
 static uint8_t       s_step_refractory_samples = 0;
 static uint16_t      s_report_sample_count = 0;
@@ -735,6 +741,10 @@ static void motion_session_reset(void)
     vibration_window_reset();
     s_step_axis = -1;
     s_step_first_sign = 0;
+    s_step_candidate_axis = -1;
+    s_step_candidate_sign = 0;
+    s_step_candidate_samples = 0;
+    s_step_opposite_samples = 0;
     s_step_timeout_samples = 0;
     s_step_refractory_samples = 0;
     s_report_sample_count = 0;
@@ -801,48 +811,85 @@ static void gyro_step_process(icm42688p_data_t const * p_imu)
 
     if (s_step_first_sign == 0)
     {
+        int8_t candidate_sign = 0;
+        int8_t candidate_axis;
+
         if ((ax >= ay) && (ax >= az))
         {
-            s_step_axis = 0;
+            candidate_axis = 0;
             value = p_imu->gyro_x;
         }
         else if (ay >= az)
         {
-            s_step_axis = 1;
+            candidate_axis = 1;
             value = p_imu->gyro_y;
         }
         else
         {
-            s_step_axis = 2;
+            candidate_axis = 2;
             value = p_imu->gyro_z;
         }
 
         if (value >= STEP_GYRO_THRESHOLD_DPS)
         {
-            s_step_first_sign = 1;
-            s_step_timeout_samples = 0;
+            candidate_sign = 1;
         }
         else if (value <= -STEP_GYRO_THRESHOLD_DPS)
         {
-            s_step_first_sign = -1;
-            s_step_timeout_samples = 0;
+            candidate_sign = -1;
+        }
+
+        if (candidate_sign == 0)
+        {
+            s_step_candidate_axis = -1;
+            s_step_candidate_sign = 0;
+            s_step_candidate_samples = 0;
+        }
+        else if ((candidate_axis == s_step_candidate_axis) &&
+                 (candidate_sign == s_step_candidate_sign))
+        {
+            s_step_candidate_samples++;
         }
         else
         {
-            s_step_axis = -1;
+            s_step_candidate_axis = candidate_axis;
+            s_step_candidate_sign = candidate_sign;
+            s_step_candidate_samples = 1U;
+        }
+
+        if (s_step_candidate_samples >= STEP_CONFIRM_SAMPLES)
+        {
+            s_step_axis = s_step_candidate_axis;
+            s_step_first_sign = s_step_candidate_sign;
+            s_step_candidate_axis = -1;
+            s_step_candidate_sign = 0;
+            s_step_candidate_samples = 0;
+            s_step_opposite_samples = 0;
+            s_step_timeout_samples = 0;
         }
         return;
     }
 
     value = gyro_axis_value(p_imu, s_step_axis);
     s_step_timeout_samples++;
-    if (((s_step_first_sign > 0) && (value <= -STEP_GYRO_THRESHOLD_DPS)) ||
-        ((s_step_first_sign < 0) && (value >= STEP_GYRO_THRESHOLD_DPS)))
+    if ((s_step_timeout_samples >= STEP_MIN_REVERSAL_SAMPLES) &&
+        (((s_step_first_sign > 0) && (value <= -STEP_GYRO_THRESHOLD_DPS)) ||
+         ((s_step_first_sign < 0) && (value >= STEP_GYRO_THRESHOLD_DPS))))
+    {
+        s_step_opposite_samples++;
+    }
+    else
+    {
+        s_step_opposite_samples = 0;
+    }
+
+    if (s_step_opposite_samples >= STEP_CONFIRM_SAMPLES)
     {
         s_step_count++;
         s_status_dirty = true;  /* Show every completed movement on the phone. */
         s_step_axis = -1;
         s_step_first_sign = 0;
+        s_step_opposite_samples = 0;
         s_step_timeout_samples = 0;
         s_step_refractory_samples = STEP_REFRACTORY_SAMPLES;
     }
@@ -850,6 +897,7 @@ static void gyro_step_process(icm42688p_data_t const * p_imu)
     {
         s_step_axis = -1;
         s_step_first_sign = 0;
+        s_step_opposite_samples = 0;
         s_step_timeout_samples = 0;
     }
 }
