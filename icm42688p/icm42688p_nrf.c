@@ -170,13 +170,13 @@ bool icm42688p_init(void)
         return false;
     }
 
-    /* 上电: 加速度计 + 陀螺仪 低噪声模式 */
+    /* Configure ranges and ODRs while all sensing blocks are off. */
     set_bank(0);
-    if (!icm42688p_write_reg(REG_PWR_MGMT0, 0x0F)) {
-        MY_LOG_ERROR("ICM42688P power on failed");
+    /* PWR_MGMT0: TEMP_DIS=1, gyro off, accelerometer off. */
+    if (!icm42688p_write_reg(REG_PWR_MGMT0, 0x20)) {
+        MY_LOG_ERROR("ICM42688P standby configuration failed");
         return false;
     }
-    nrf_delay_ms(1);
 
     icm42688p_set_accel_fs(ACCEL_FS_8G);
     icm42688p_set_gyro_fs(GYRO_FS_2000);
@@ -190,7 +190,8 @@ bool icm42688p_init(void)
 bool icm42688p_power_on(void)
 {
     set_bank(0);
-    if (!icm42688p_write_reg(REG_PWR_MGMT0, 0x0F)) {
+    /* Temperature remains disabled in the legacy six-axis mode. */
+    if (!icm42688p_write_reg(REG_PWR_MGMT0, 0x2F)) {
         return false;
     }
 
@@ -214,6 +215,20 @@ bool icm42688p_accel_high_rate_on(void)
     return true;
 }
 
+bool icm42688p_accel_low_power_on(void)
+{
+    icm42688p_set_accel_odr(ODR_25HZ);
+    set_bank(0);
+    /* PWR_MGMT0: TEMP_DIS=1, GYRO_MODE=OFF, ACCEL_MODE=LOW_POWER. */
+    if (!icm42688p_write_reg(REG_PWR_MGMT0, 0x22)) {
+        return false;
+    }
+
+    /* One-time start-up settling delay; the sensor remains on while monitoring. */
+    nrf_delay_ms(20);
+    return true;
+}
+
 bool icm42688p_motion_high_rate_on(void)
 {
     icm42688p_set_accel_odr(ODR_200HZ);
@@ -232,7 +247,8 @@ bool icm42688p_motion_high_rate_on(void)
 bool icm42688p_power_off(void)
 {
     set_bank(0);
-    if (!icm42688p_write_reg(REG_PWR_MGMT0, 0x00)) {
+    /* Keep TEMP_DIS set; 0x00 would leave the temperature block enabled. */
+    if (!icm42688p_write_reg(REG_PWR_MGMT0, 0x20)) {
         return false;
     }
 
