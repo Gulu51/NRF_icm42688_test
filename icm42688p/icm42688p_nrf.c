@@ -179,7 +179,7 @@ bool icm42688p_init(void)
     }
 
     icm42688p_set_accel_fs(ACCEL_FS_8G);
-    icm42688p_set_gyro_fs(GYRO_FS_2000);
+    icm42688p_set_gyro_fs(GYRO_FS_500);
     icm42688p_set_accel_odr(ODR_200HZ);
     icm42688p_set_gyro_odr(ODR_200HZ);
 
@@ -215,17 +215,18 @@ bool icm42688p_accel_high_rate_on(void)
     return true;
 }
 
-bool icm42688p_accel_low_power_on(void)
+bool icm42688p_motion_low_power_on(void)
 {
-    icm42688p_set_accel_odr(ODR_25HZ);
+    icm42688p_set_accel_odr(ODR_50HZ);
+    icm42688p_set_gyro_odr(ODR_50HZ);
     set_bank(0);
-    /* PWR_MGMT0: TEMP_DIS=1, GYRO_MODE=OFF, ACCEL_MODE=LOW_POWER. */
-    if (!icm42688p_write_reg(REG_PWR_MGMT0, 0x22)) {
+    /* PWR_MGMT0: TEMP_DIS=1, GYRO_MODE=LN, ACCEL_MODE=LOW_POWER. */
+    if (!icm42688p_write_reg(REG_PWR_MGMT0, 0x2E)) {
         return false;
     }
 
-    /* One-time start-up settling delay; the sensor remains on while monitoring. */
-    nrf_delay_ms(20);
+    /* The gyroscope needs about 45 ms before its first usable sample. */
+    nrf_delay_ms(50);
     return true;
 }
 

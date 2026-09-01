@@ -97,10 +97,10 @@
 
 #define APP_ADV_DURATION                0                                           /**< Advertise slowly until a phone connects. */
 
-#define MIN_CONN_INTERVAL               MSEC_TO_UNITS(500, UNIT_1_25_MS)             /**< Minimum acceptable connection interval (20 ms), Connection interval uses 1.25 ms units. */
-#define MAX_CONN_INTERVAL               MSEC_TO_UNITS(500, UNIT_1_25_MS)             /**< Maximum acceptable connection interval (75 ms), Connection interval uses 1.25 ms units. */
+#define MIN_CONN_INTERVAL               MSEC_TO_UNITS(100, UNIT_1_25_MS)             /**< Phone-compatible low-power range. */
+#define MAX_CONN_INTERVAL               MSEC_TO_UNITS(200, UNIT_1_25_MS)
 #define SLAVE_LATENCY                   4                                           /**< Skip up to four idle connection events. */
-#define CONN_SUP_TIMEOUT                MSEC_TO_UNITS(6000, UNIT_10_MS)             /**< Must exceed 2*(latency+1)*500 ms. */
+#define CONN_SUP_TIMEOUT                MSEC_TO_UNITS(6000, UNIT_10_MS)             /**< Safely exceeds the BLE latency/interval requirement. */
 #define FIRST_CONN_PARAMS_UPDATE_DELAY  APP_TIMER_TICKS(1000)                       /**< Request low-power parameters shortly after connection. */
 #define NEXT_CONN_PARAMS_UPDATE_DELAY   APP_TIMER_TICKS(10000)                      /**< Retry after 10 seconds. */
 #define MAX_CONN_PARAMS_UPDATE_COUNT    3                                           /**< Number of attempts before giving up the connection parameter negotiation. */
@@ -133,14 +133,14 @@ static ble_uuid_t m_adv_uuids[]          =                                      
 #define FPU_EXCEPTION_MASK               0x0000009F                      //!< FPU exception mask used to clear exceptions in FPSCR register.
 #define FPU_FPSCR_REG_STACK_OFF          0x40                            //!< Offset of FPSCR register stacked during interrupt handling in FPU part stack
 
-/* Continuous low-power monitor: accelerometer LP mode, gyro and temperature off. */
-#define IMU_SAMPLE_PERIOD_MS             40U      /* 25 Hz is sufficient for walking and gross shocks. */
-#define STATUS_REPORT_PERIOD_SAMPLES     125U     /* At most one routine BLE report every 5 seconds. */
-#define GRAVITY_EMA_ALPHA                0.02f
-#define STEP_TRIGGER_SQ_THRESHOLD        0.0324f  /* 0.18 g dynamic-vector magnitude. */
-#define STEP_RELEASE_SQ_THRESHOLD        0.0064f  /* 0.08 g hysteresis release. */
-#define STEP_REFRACTORY_SAMPLES          8U       /* 320 ms: rejects double counting. */
-#define VIBRATION_WINDOW_SAMPLES         25U      /* One-second decision window at 25 Hz. */
+/* 50 Hz compromise: reliable gyro reversals with much less work than 200 Hz. */
+#define IMU_SAMPLE_PERIOD_MS             20U
+#define STATUS_REPORT_PERIOD_SAMPLES     250U     /* At most one routine BLE report every 5 seconds. */
+#define GRAVITY_EMA_ALPHA                0.01f
+#define STEP_GYRO_THRESHOLD_DPS          25.0f    /* Both halves of a movement must cross this. */
+#define STEP_GYRO_TIMEOUT_SAMPLES        75U      /* Opposite direction must arrive within 1.5 s. */
+#define STEP_REFRACTORY_SAMPLES          5U       /* 100 ms after a completed movement. */
+#define VIBRATION_WINDOW_SAMPLES         50U      /* One-second accelerometer window at 50 Hz. */
 #define VIBRATION_RMS_SQ_THRESHOLD       0.1225f  /* 0.35 g RMS. */
 #define VIBRATION_PEAK_SQ_THRESHOLD      1.44f    /* 1.20 g dynamic peak. */
 #define VIBRATION_ALARM_HOLD_WINDOWS     3U
@@ -162,7 +162,9 @@ static volatile bool s_stop_requested = false;
 static volatile bool s_reset_requested = false;
 static app_state_t   s_app_state = APP_STATE_BOOT;
 static uint32_t      s_step_count = 0;
-static bool          s_step_peak_seen = false;
+static int8_t        s_step_axis = -1;
+static int8_t        s_step_first_sign = 0;
+static uint8_t       s_step_timeout_samples = 0;
 static uint8_t       s_step_refractory_samples = 0;
 static uint16_t      s_report_sample_count = 0;
 static bool          s_gravity_ready = false;
@@ -377,21 +379,14 @@ static void services_init(void)
  * @details This function will be called for all events in the Connection Parameters Module
  *          which are passed to the application.
  *
- * @note All this function does is to disconnect. This could have been done by simply setting
- *       the disconnect_on_fail config parameter, but instead we use the event handler
- *       mechanism to demonstrate its use.
+ * @note A phone may reject the preferred low-power interval. Keep its existing
+ *       parameters instead of disconnecting a valid monitoring session.
  *
  * @param[in] p_evt  Event received from the Connection Parameters Module.
  */
 static void on_conn_params_evt(ble_conn_params_evt_t * p_evt)
 {
-    uint32_t err_code;
-
-    if (p_evt->evt_type == BLE_CONN_PARAMS_EVT_FAILED)
-    {
-        err_code = sd_ble_gap_disconnect(m_conn_handle, BLE_HCI_CONN_INTERVAL_UNACCEPTABLE);
-        APP_ERROR_CHECK(err_code);
-    }
+    (void)p_evt;
 }
 
 
@@ -401,7 +396,7 @@ static void on_conn_params_evt(ble_conn_params_evt_t * p_evt)
  */
 static void conn_params_error_handler(uint32_t nrf_error)
 {
-    APP_ERROR_HANDLER(nrf_error);
+    (void)nrf_error;
 }
 
 
@@ -738,7 +733,9 @@ static void motion_session_reset(void)
 {
     s_gravity_ready = false;
     vibration_window_reset();
-    s_step_peak_seen = false;
+    s_step_axis = -1;
+    s_step_first_sign = 0;
+    s_step_timeout_samples = 0;
     s_step_refractory_samples = 0;
     s_report_sample_count = 0;
     s_vibration_alarm_hold = 0;
@@ -782,12 +779,90 @@ static void vibration_window_finish(void)
     vibration_window_reset();
 }
 
+static float gyro_axis_value(icm42688p_data_t const * p_imu, int8_t axis)
+{
+    if (axis == 0) return p_imu->gyro_x;
+    if (axis == 1) return p_imu->gyro_y;
+    return p_imu->gyro_z;
+}
+
+static void gyro_step_process(icm42688p_data_t const * p_imu)
+{
+    float ax = (p_imu->gyro_x < 0.0f) ? -p_imu->gyro_x : p_imu->gyro_x;
+    float ay = (p_imu->gyro_y < 0.0f) ? -p_imu->gyro_y : p_imu->gyro_y;
+    float az = (p_imu->gyro_z < 0.0f) ? -p_imu->gyro_z : p_imu->gyro_z;
+    float value;
+
+    if (s_step_refractory_samples > 0U)
+    {
+        s_step_refractory_samples--;
+        return;
+    }
+
+    if (s_step_first_sign == 0)
+    {
+        if ((ax >= ay) && (ax >= az))
+        {
+            s_step_axis = 0;
+            value = p_imu->gyro_x;
+        }
+        else if (ay >= az)
+        {
+            s_step_axis = 1;
+            value = p_imu->gyro_y;
+        }
+        else
+        {
+            s_step_axis = 2;
+            value = p_imu->gyro_z;
+        }
+
+        if (value >= STEP_GYRO_THRESHOLD_DPS)
+        {
+            s_step_first_sign = 1;
+            s_step_timeout_samples = 0;
+        }
+        else if (value <= -STEP_GYRO_THRESHOLD_DPS)
+        {
+            s_step_first_sign = -1;
+            s_step_timeout_samples = 0;
+        }
+        else
+        {
+            s_step_axis = -1;
+        }
+        return;
+    }
+
+    value = gyro_axis_value(p_imu, s_step_axis);
+    s_step_timeout_samples++;
+    if (((s_step_first_sign > 0) && (value <= -STEP_GYRO_THRESHOLD_DPS)) ||
+        ((s_step_first_sign < 0) && (value >= STEP_GYRO_THRESHOLD_DPS)))
+    {
+        s_step_count++;
+        s_status_dirty = true;  /* Show every completed movement on the phone. */
+        s_step_axis = -1;
+        s_step_first_sign = 0;
+        s_step_timeout_samples = 0;
+        s_step_refractory_samples = STEP_REFRACTORY_SAMPLES;
+    }
+    else if (s_step_timeout_samples >= STEP_GYRO_TIMEOUT_SAMPLES)
+    {
+        s_step_axis = -1;
+        s_step_first_sign = 0;
+        s_step_timeout_samples = 0;
+    }
+}
+
 static void motion_process(icm42688p_data_t const * p_imu)
 {
     float dx;
     float dy;
     float dz;
     float vibration_sq;
+
+    /* Step count is derived only from a signed gyro reversal. */
+    gyro_step_process(p_imu);
 
     if (!s_gravity_ready)
     {
@@ -823,27 +898,6 @@ static void motion_process(icm42688p_data_t const * p_imu)
         }
         s_vibration_alarm_hold = VIBRATION_ALARM_HOLD_WINDOWS;
         s_vibration_severe = true;
-        s_step_peak_seen = false;
-        s_step_refractory_samples = STEP_REFRACTORY_SAMPLES;
-    }
-    else
-    {
-        if (s_step_refractory_samples > 0U)
-        {
-            s_step_refractory_samples--;
-        }
-        else if (!s_step_peak_seen &&
-                 (vibration_sq >= STEP_TRIGGER_SQ_THRESHOLD))
-        {
-            s_step_peak_seen = true;
-        }
-        else if (s_step_peak_seen &&
-                 (vibration_sq <= STEP_RELEASE_SQ_THRESHOLD))
-        {
-            s_step_count++;
-            s_step_peak_seen = false;
-            s_step_refractory_samples = STEP_REFRACTORY_SAMPLES;
-        }
     }
 
     if (s_vibration_samples >= VIBRATION_WINDOW_SAMPLES)
@@ -892,7 +946,7 @@ static bool monitor_start(void)
 {
     monitor_stop();
     motion_session_reset();
-    if (!icm42688p_accel_low_power_on())
+    if (!icm42688p_motion_low_power_on())
     {
         return false;
     }
@@ -974,7 +1028,7 @@ static void idle_state_handle(void)
 
     if (s_imu_ok) {
         icm42688p_data_t imu_data;
-        if (icm42688p_read_accel(&imu_data)) {
+        if (icm42688p_read_motion(&imu_data)) {
             motion_process(&imu_data);
             if (s_warning_pending)
             {
