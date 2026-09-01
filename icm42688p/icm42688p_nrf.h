@@ -109,6 +109,13 @@ bool icm42688p_power_on(void);
  */
 bool icm42688p_accel_high_rate_on(void);
 
+/**@brief Enable only the accelerometer at 25 Hz in low-power mode.
+ *
+ * Used as the always-on motion and strong-vibration gate. The gyroscope and
+ * temperature sensor remain disabled.
+ */
+bool icm42688p_accel_low_power_on(void);
+
 /**@brief Enable accelerometer and gyroscope at 50 Hz for motion monitoring.
  *
  * The accelerometer uses low-power mode, the gyroscope uses low-noise mode,

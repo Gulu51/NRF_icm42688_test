@@ -97,8 +97,8 @@
 
 #define APP_ADV_DURATION                0                                           /**< Advertise slowly until a phone connects. */
 
-#define MIN_CONN_INTERVAL               MSEC_TO_UNITS(100, UNIT_1_25_MS)             /**< Phone-compatible low-power range. */
-#define MAX_CONN_INTERVAL               MSEC_TO_UNITS(200, UNIT_1_25_MS)
+#define MIN_CONN_INTERVAL               MSEC_TO_UNITS(200, UNIT_1_25_MS)             /**< Prefer a long interval; keep the phone's value if rejected. */
+#define MAX_CONN_INTERVAL               MSEC_TO_UNITS(500, UNIT_1_25_MS)
 #define SLAVE_LATENCY                   4                                           /**< Skip up to four idle connection events. */
 #define CONN_SUP_TIMEOUT                MSEC_TO_UNITS(6000, UNIT_10_MS)             /**< Safely exceeds the BLE latency/interval requirement. */
 #define FIRST_CONN_PARAMS_UPDATE_DELAY  APP_TIMER_TICKS(1000)                       /**< Request low-power parameters shortly after connection. */
@@ -133,16 +133,23 @@ static ble_uuid_t m_adv_uuids[]          =                                      
 #define FPU_EXCEPTION_MASK               0x0000009F                      //!< FPU exception mask used to clear exceptions in FPSCR register.
 #define FPU_FPSCR_REG_STACK_OFF          0x40                            //!< Offset of FPSCR register stacked during interrupt handling in FPU part stack
 
-/* 50 Hz compromise: reliable gyro reversals with much less work than 200 Hz. */
-#define IMU_SAMPLE_PERIOD_MS             20U
-#define STATUS_REPORT_PERIOD_SAMPLES     250U     /* At most one routine BLE report every 5 seconds. */
+/* Motion-gated sensing: accel-only at rest, 50 Hz gyro only while moving. */
+#define ACCEL_IDLE_SAMPLE_PERIOD_MS      40U      /* 25 Hz accelerometer low-power gate. */
+#define GYRO_ACTIVE_SAMPLE_PERIOD_MS     20U      /* 50 Hz gyro step detector. */
+#define STATUS_HEARTBEAT_MS              5000U
+#define STEP_REPORT_MIN_INTERVAL_MS      1000U
 #define GRAVITY_EMA_ALPHA                0.01f
+#define MOTION_WAKE_SQ_THRESHOLD         0.0100f  /* 0.10 g dynamic acceleration. */
+#define MOTION_WAKE_CONFIRM_SAMPLES      2U       /* 80 ms at the 25 Hz idle rate. */
+#define MOTION_KEEP_AWAKE_SQ_THRESHOLD   0.0064f  /* 0.08 g while gyro is active. */
+#define MOTION_KEEP_AWAKE_GYRO_DPS       10.0f
+#define GYRO_IDLE_TIMEOUT_MS             5000U
 #define STEP_GYRO_THRESHOLD_DPS          40.0f    /* Reject small wrist jitter and gyro noise. */
 #define STEP_CONFIRM_SAMPLES             3U       /* Direction must persist for 60 ms. */
 #define STEP_MIN_REVERSAL_SAMPLES        5U       /* Reject a sign spike sooner than 100 ms. */
 #define STEP_GYRO_TIMEOUT_SAMPLES        75U      /* Opposite direction must arrive within 1.5 s. */
 #define STEP_REFRACTORY_SAMPLES          12U      /* 240 ms after a completed movement. */
-#define VIBRATION_WINDOW_SAMPLES         50U      /* One-second accelerometer window at 50 Hz. */
+#define VIBRATION_WINDOW_MS              1000U
 #define VIBRATION_RMS_SQ_THRESHOLD       0.1225f  /* 0.35 g RMS. */
 #define VIBRATION_PEAK_SQ_THRESHOLD      1.44f    /* 1.20 g dynamic peak. */
 #define VIBRATION_ALARM_HOLD_WINDOWS     3U
@@ -156,13 +163,21 @@ typedef enum
     APP_STATE_SERVICE_OFF
 } app_state_t;
 
+typedef enum
+{
+    SENSOR_MODE_ACCEL_IDLE,
+    SENSOR_MODE_GYRO_ACTIVE
+} sensor_mode_t;
+
 static volatile bool s_sample_due = false;
 static bool          s_sample_timer_running = false;
+static uint16_t      s_sample_period_ms = ACCEL_IDLE_SAMPLE_PERIOD_MS;
 static volatile bool s_close_requested = false;
 static volatile bool s_start_requested = false;
 static volatile bool s_stop_requested = false;
 static volatile bool s_reset_requested = false;
 static app_state_t   s_app_state = APP_STATE_BOOT;
+static sensor_mode_t s_sensor_mode = SENSOR_MODE_ACCEL_IDLE;
 static uint32_t      s_step_count = 0;
 static int8_t        s_step_axis = -1;
 static int8_t        s_step_first_sign = 0;
@@ -172,7 +187,10 @@ static uint8_t       s_step_candidate_samples = 0;
 static uint8_t       s_step_opposite_samples = 0;
 static uint8_t       s_step_timeout_samples = 0;
 static uint8_t       s_step_refractory_samples = 0;
-static uint16_t      s_report_sample_count = 0;
+static uint16_t      s_report_elapsed_ms = 0;
+static bool          s_step_report_pending = false;
+static uint8_t       s_motion_wake_samples = 0;
+static uint16_t      s_active_quiet_ms = 0;
 static bool          s_gravity_ready = false;
 static float         s_gravity_x = 0.0f;
 static float         s_gravity_y = 0.0f;
@@ -180,6 +198,7 @@ static float         s_gravity_z = 0.0f;
 static float         s_vibration_energy_sum = 0.0f;
 static float         s_vibration_peak_sq = 0.0f;
 static uint16_t      s_vibration_samples = 0;
+static uint16_t      s_vibration_window_elapsed_ms = 0;
 static uint8_t       s_vibration_alarm_hold = 0;
 static bool          s_vibration_severe = false;
 static bool          s_status_dirty = false;
@@ -707,12 +726,13 @@ static void power_management_init(void)
     APP_ERROR_CHECK(err_code);
 }
 
-static void sample_timer_start(void)
+static void sample_timer_start(uint16_t period_ms)
 {
     if (!s_sample_timer_running)
     {
+        s_sample_period_ms = period_ms;
         APP_ERROR_CHECK(app_timer_start(task_timer,
-                                        APP_TIMER_TICKS(IMU_SAMPLE_PERIOD_MS),
+                                        APP_TIMER_TICKS(period_ms),
                                         NULL));
         s_sample_timer_running = true;
     }
@@ -733,12 +753,11 @@ static void vibration_window_reset(void)
     s_vibration_energy_sum = 0.0f;
     s_vibration_peak_sq = 0.0f;
     s_vibration_samples = 0;
+    s_vibration_window_elapsed_ms = 0;
 }
 
-static void motion_session_reset(void)
+static void gyro_step_state_reset(void)
 {
-    s_gravity_ready = false;
-    vibration_window_reset();
     s_step_axis = -1;
     s_step_first_sign = 0;
     s_step_candidate_axis = -1;
@@ -747,7 +766,17 @@ static void motion_session_reset(void)
     s_step_opposite_samples = 0;
     s_step_timeout_samples = 0;
     s_step_refractory_samples = 0;
-    s_report_sample_count = 0;
+}
+
+static void motion_session_reset(void)
+{
+    s_gravity_ready = false;
+    vibration_window_reset();
+    gyro_step_state_reset();
+    s_report_elapsed_ms = 0;
+    s_step_report_pending = false;
+    s_motion_wake_samples = 0;
+    s_active_quiet_ms = 0;
     s_vibration_alarm_hold = 0;
     s_vibration_severe = false;
     s_warning_pending = false;
@@ -758,7 +787,7 @@ static void vibration_window_finish(void)
 {
     bool old_state = s_vibration_severe;
 
-    if (s_vibration_samples >= VIBRATION_WINDOW_SAMPLES)
+    if (s_vibration_samples > 0U)
     {
         bool severe_now =
             ((s_vibration_energy_sum / (float)s_vibration_samples) >=
@@ -794,6 +823,15 @@ static float gyro_axis_value(icm42688p_data_t const * p_imu, int8_t axis)
     if (axis == 0) return p_imu->gyro_x;
     if (axis == 1) return p_imu->gyro_y;
     return p_imu->gyro_z;
+}
+
+static float gyro_abs_max(icm42688p_data_t const * p_imu)
+{
+    float ax = (p_imu->gyro_x < 0.0f) ? -p_imu->gyro_x : p_imu->gyro_x;
+    float ay = (p_imu->gyro_y < 0.0f) ? -p_imu->gyro_y : p_imu->gyro_y;
+    float az = (p_imu->gyro_z < 0.0f) ? -p_imu->gyro_z : p_imu->gyro_z;
+    float maximum = (ax > ay) ? ax : ay;
+    return (maximum > az) ? maximum : az;
 }
 
 static void gyro_step_process(icm42688p_data_t const * p_imu)
@@ -886,7 +924,11 @@ static void gyro_step_process(icm42688p_data_t const * p_imu)
     if (s_step_opposite_samples >= STEP_CONFIRM_SAMPLES)
     {
         s_step_count++;
-        s_status_dirty = true;  /* Show every completed movement on the phone. */
+        s_step_report_pending = true;
+        if (s_report_elapsed_ms >= STEP_REPORT_MIN_INTERVAL_MS)
+        {
+            s_status_dirty = true;
+        }
         s_step_axis = -1;
         s_step_first_sign = 0;
         s_step_opposite_samples = 0;
@@ -902,15 +944,18 @@ static void gyro_step_process(icm42688p_data_t const * p_imu)
     }
 }
 
-static void motion_process(icm42688p_data_t const * p_imu)
+static float motion_process(icm42688p_data_t const * p_imu, bool gyro_valid)
 {
     float dx;
     float dy;
     float dz;
-    float vibration_sq;
+    float vibration_sq = 0.0f;
 
-    /* Step count is derived only from a signed gyro reversal. */
-    gyro_step_process(p_imu);
+    if (gyro_valid)
+    {
+        /* Step count is derived only from a signed gyro reversal. */
+        gyro_step_process(p_imu);
+    }
 
     if (!s_gravity_ready)
     {
@@ -918,47 +963,59 @@ static void motion_process(icm42688p_data_t const * p_imu)
         s_gravity_y = p_imu->acc_y;
         s_gravity_z = p_imu->acc_z;
         s_gravity_ready = true;
-        return;
     }
-
-    s_gravity_x += GRAVITY_EMA_ALPHA * (p_imu->acc_x - s_gravity_x);
-    s_gravity_y += GRAVITY_EMA_ALPHA * (p_imu->acc_y - s_gravity_y);
-    s_gravity_z += GRAVITY_EMA_ALPHA * (p_imu->acc_z - s_gravity_z);
-    dx = p_imu->acc_x - s_gravity_x;
-    dy = p_imu->acc_y - s_gravity_y;
-    dz = p_imu->acc_z - s_gravity_z;
-    vibration_sq = dx * dx + dy * dy + dz * dz;
-
-    s_vibration_energy_sum += vibration_sq;
-    if (vibration_sq > s_vibration_peak_sq)
+    else
     {
-        s_vibration_peak_sq = vibration_sq;
-    }
-    s_vibration_samples++;
+        s_gravity_x += GRAVITY_EMA_ALPHA * (p_imu->acc_x - s_gravity_x);
+        s_gravity_y += GRAVITY_EMA_ALPHA * (p_imu->acc_y - s_gravity_y);
+        s_gravity_z += GRAVITY_EMA_ALPHA * (p_imu->acc_z - s_gravity_z);
+        dx = p_imu->acc_x - s_gravity_x;
+        dy = p_imu->acc_y - s_gravity_y;
+        dz = p_imu->acc_z - s_gravity_z;
+        vibration_sq = dx * dx + dy * dy + dz * dz;
 
-    /* A very large single shock is reported immediately instead of waiting
-       for the one-second RMS window to finish. */
-    if (vibration_sq >= VIBRATION_PEAK_SQ_THRESHOLD)
-    {
-        if (!s_vibration_severe)
+        s_vibration_energy_sum += vibration_sq;
+        if (vibration_sq > s_vibration_peak_sq)
         {
-            s_warning_pending = true;
+            s_vibration_peak_sq = vibration_sq;
         }
-        s_vibration_alarm_hold = VIBRATION_ALARM_HOLD_WINDOWS;
-        s_vibration_severe = true;
+        s_vibration_samples++;
+
+        /* A very large single shock is reported immediately instead of waiting
+           for the one-second RMS window to finish. */
+        if (vibration_sq >= VIBRATION_PEAK_SQ_THRESHOLD)
+        {
+            if (!s_vibration_severe)
+            {
+                s_warning_pending = true;
+            }
+            s_vibration_alarm_hold = VIBRATION_ALARM_HOLD_WINDOWS;
+            s_vibration_severe = true;
+        }
     }
 
-    if (s_vibration_samples >= VIBRATION_WINDOW_SAMPLES)
+    s_vibration_window_elapsed_ms += s_sample_period_ms;
+    if (s_vibration_window_elapsed_ms >= VIBRATION_WINDOW_MS)
     {
         vibration_window_finish();
     }
 
-    s_report_sample_count++;
-    if (s_report_sample_count >= STATUS_REPORT_PERIOD_SAMPLES)
+    if (s_report_elapsed_ms < STATUS_HEARTBEAT_MS)
     {
-        s_report_sample_count = 0;
+        s_report_elapsed_ms += s_sample_period_ms;
+        if (s_report_elapsed_ms > STATUS_HEARTBEAT_MS)
+        {
+            s_report_elapsed_ms = STATUS_HEARTBEAT_MS;
+        }
+    }
+    if ((s_step_report_pending &&
+         (s_report_elapsed_ms >= STEP_REPORT_MIN_INTERVAL_MS)) ||
+        (s_report_elapsed_ms >= STATUS_HEARTBEAT_MS))
+    {
         s_status_dirty = true;
     }
+
+    return vibration_sq;
 }
 
 static void ble_send_status(void)
@@ -971,6 +1028,8 @@ static void ble_send_status(void)
     if (ble_send((uint8_t *)output, (uint16_t)len))
     {
         s_status_dirty = false;
+        s_step_report_pending = false;
+        s_report_elapsed_ms = 0;
     }
 }
 
@@ -984,22 +1043,54 @@ static void ble_send_warning(void)
     }
 }
 
+static bool sensor_enter_accel_idle(void)
+{
+    sample_timer_stop();
+    if (!icm42688p_accel_low_power_on())
+    {
+        return false;
+    }
+
+    gyro_step_state_reset();
+    s_sensor_mode = SENSOR_MODE_ACCEL_IDLE;
+    s_motion_wake_samples = 0;
+    s_active_quiet_ms = 0;
+    sample_timer_start(ACCEL_IDLE_SAMPLE_PERIOD_MS);
+    return true;
+}
+
+static bool sensor_enter_gyro_active(void)
+{
+    sample_timer_stop();
+    if (!icm42688p_motion_low_power_on())
+    {
+        return false;
+    }
+
+    gyro_step_state_reset();
+    s_sensor_mode = SENSOR_MODE_GYRO_ACTIVE;
+    s_motion_wake_samples = 0;
+    s_active_quiet_ms = 0;
+    sample_timer_start(GYRO_ACTIVE_SAMPLE_PERIOD_MS);
+    return true;
+}
+
 static void monitor_stop(void)
 {
     sample_timer_stop();
     (void)icm42688p_power_off();
+    s_sensor_mode = SENSOR_MODE_ACCEL_IDLE;
+    s_motion_wake_samples = 0;
+    s_active_quiet_ms = 0;
 }
 
 static bool monitor_start(void)
 {
     monitor_stop();
     motion_session_reset();
-    if (!icm42688p_motion_low_power_on())
-    {
-        return false;
-    }
-    sample_timer_start();
-    return true;
+    /* Capture movement immediately after START; fall back to accel-only after
+       five quiet seconds. */
+    return sensor_enter_gyro_active();
 }
 
 
@@ -1076,8 +1167,65 @@ static void idle_state_handle(void)
 
     if (s_imu_ok) {
         icm42688p_data_t imu_data;
-        if (icm42688p_read_motion(&imu_data)) {
-            motion_process(&imu_data);
+        bool sample_ok;
+        bool mode_ok = true;
+        float vibration_sq;
+
+        if (s_sensor_mode == SENSOR_MODE_ACCEL_IDLE)
+        {
+            sample_ok = icm42688p_read_accel(&imu_data);
+            if (sample_ok)
+            {
+                vibration_sq = motion_process(&imu_data, false);
+                if (vibration_sq >= MOTION_WAKE_SQ_THRESHOLD)
+                {
+                    if (s_motion_wake_samples < MOTION_WAKE_CONFIRM_SAMPLES)
+                    {
+                        s_motion_wake_samples++;
+                    }
+                }
+                else
+                {
+                    s_motion_wake_samples = 0;
+                }
+
+                if (s_motion_wake_samples >= MOTION_WAKE_CONFIRM_SAMPLES)
+                {
+                    mode_ok = sensor_enter_gyro_active();
+                }
+            }
+        }
+        else
+        {
+            sample_ok = icm42688p_read_motion(&imu_data);
+            if (sample_ok)
+            {
+                vibration_sq = motion_process(&imu_data, true);
+                if ((vibration_sq >= MOTION_KEEP_AWAKE_SQ_THRESHOLD) ||
+                    (gyro_abs_max(&imu_data) >= MOTION_KEEP_AWAKE_GYRO_DPS))
+                {
+                    s_active_quiet_ms = 0;
+                }
+                else if (s_active_quiet_ms < GYRO_IDLE_TIMEOUT_MS)
+                {
+                    s_active_quiet_ms += GYRO_ACTIVE_SAMPLE_PERIOD_MS;
+                }
+
+                if (s_active_quiet_ms >= GYRO_IDLE_TIMEOUT_MS)
+                {
+                    mode_ok = sensor_enter_accel_idle();
+                }
+            }
+        }
+
+        if (!mode_ok)
+        {
+            monitor_stop();
+            s_app_state = APP_STATE_CONNECTED_IDLE;
+            (void)ble_send((uint8_t *)"IMU,ERROR\r\n", 11U);
+        }
+        else if (sample_ok)
+        {
             if (s_warning_pending)
             {
                 ble_send_warning();

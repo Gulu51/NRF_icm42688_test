@@ -215,6 +215,19 @@ bool icm42688p_accel_high_rate_on(void)
     return true;
 }
 
+bool icm42688p_accel_low_power_on(void)
+{
+    icm42688p_set_accel_odr(ODR_25HZ);
+    set_bank(0);
+    /* PWR_MGMT0: TEMP_DIS=1, GYRO_MODE=OFF, ACCEL_MODE=LOW_POWER. */
+    if (!icm42688p_write_reg(REG_PWR_MGMT0, 0x22)) {
+        return false;
+    }
+
+    nrf_delay_ms(20);
+    return true;
+}
+
 bool icm42688p_motion_low_power_on(void)
 {
     icm42688p_set_accel_odr(ODR_50HZ);
