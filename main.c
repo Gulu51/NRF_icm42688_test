@@ -137,13 +137,14 @@ static ble_uuid_t m_adv_uuids[]          =                                      
 #define ACCEL_IDLE_SAMPLE_PERIOD_MS      40U      /* 25 Hz accelerometer low-power gate. */
 #define GYRO_ACTIVE_SAMPLE_PERIOD_MS     20U      /* 50 Hz gyro step detector. */
 #define STATUS_HEARTBEAT_MS              5000U
-#define STEP_REPORT_MIN_INTERVAL_MS      1000U
+#define STEP_REPORT_MIN_INTERVAL_MS      2000U
+#define STEP_REPORT_BATCH_STEPS          3U
 #define GRAVITY_EMA_ALPHA                0.01f
 #define MOTION_WAKE_SQ_THRESHOLD         0.0100f  /* 0.10 g dynamic acceleration. */
 #define MOTION_WAKE_CONFIRM_SAMPLES      2U       /* 80 ms at the 25 Hz idle rate. */
 #define MOTION_KEEP_AWAKE_SQ_THRESHOLD   0.0064f  /* 0.08 g while gyro is active. */
 #define MOTION_KEEP_AWAKE_GYRO_DPS       10.0f
-#define GYRO_IDLE_TIMEOUT_MS             5000U
+#define GYRO_IDLE_TIMEOUT_MS             3000U
 #define STEP_GYRO_THRESHOLD_DPS          40.0f    /* Reject small wrist jitter and gyro noise. */
 #define STEP_CONFIRM_SAMPLES             3U       /* Direction must persist for 60 ms. */
 #define STEP_MIN_REVERSAL_SAMPLES        5U       /* Reject a sign spike sooner than 100 ms. */
@@ -189,6 +190,7 @@ static uint8_t       s_step_timeout_samples = 0;
 static uint8_t       s_step_refractory_samples = 0;
 static uint16_t      s_report_elapsed_ms = 0;
 static bool          s_step_report_pending = false;
+static uint32_t      s_last_reported_step_count = 0;
 static uint8_t       s_motion_wake_samples = 0;
 static uint16_t      s_active_quiet_ms = 0;
 static bool          s_gravity_ready = false;
@@ -775,6 +777,7 @@ static void motion_session_reset(void)
     gyro_step_state_reset();
     s_report_elapsed_ms = 0;
     s_step_report_pending = false;
+    s_last_reported_step_count = s_step_count;
     s_motion_wake_samples = 0;
     s_active_quiet_ms = 0;
     s_vibration_alarm_hold = 0;
@@ -925,7 +928,9 @@ static void gyro_step_process(icm42688p_data_t const * p_imu)
     {
         s_step_count++;
         s_step_report_pending = true;
-        if (s_report_elapsed_ms >= STEP_REPORT_MIN_INTERVAL_MS)
+        if (((s_step_count - s_last_reported_step_count) >=
+             STEP_REPORT_BATCH_STEPS) ||
+            (s_report_elapsed_ms >= STEP_REPORT_MIN_INTERVAL_MS))
         {
             s_status_dirty = true;
         }
@@ -1029,6 +1034,7 @@ static void ble_send_status(void)
     {
         s_status_dirty = false;
         s_step_report_pending = false;
+        s_last_reported_step_count = s_step_count;
         s_report_elapsed_ms = 0;
     }
 }
@@ -1089,7 +1095,7 @@ static bool monitor_start(void)
     monitor_stop();
     motion_session_reset();
     /* Capture movement immediately after START; fall back to accel-only after
-       five quiet seconds. */
+       three quiet seconds. */
     return sensor_enter_gyro_active();
 }
 
