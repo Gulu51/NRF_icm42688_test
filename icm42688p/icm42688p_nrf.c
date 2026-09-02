@@ -180,8 +180,11 @@ bool icm42688p_init(void)
 
     icm42688p_set_accel_fs(ACCEL_FS_8G);
     icm42688p_set_gyro_fs(GYRO_FS_500);
-    icm42688p_set_accel_odr(ODR_200HZ);
-    icm42688p_set_gyro_odr(ODR_200HZ);
+    if (!icm42688p_set_accel_odr(ODR_25HZ) ||
+        !icm42688p_set_gyro_odr(ODR_25HZ)) {
+        MY_LOG_ERROR("ICM42688P initial ODR configuration failed");
+        return false;
+    }
 
     MY_LOG_DEBUG("ICM42688P init OK");
     return true;
@@ -204,7 +207,9 @@ bool icm42688p_accel_high_rate_on(void)
 {
     /* Keep the vibration channel at 200 Hz, but do not pay the gyro cost.
        PWR_MGMT0: TEMP_DIS=1, GYRO_MODE=OFF, ACCEL_MODE=LOW_NOISE. */
-    icm42688p_set_accel_odr(ODR_200HZ);
+    if (!icm42688p_set_accel_odr(ODR_200HZ)) {
+        return false;
+    }
     set_bank(0);
     if (!icm42688p_write_reg(REG_PWR_MGMT0, 0x23)) {
         return false;
@@ -217,7 +222,9 @@ bool icm42688p_accel_high_rate_on(void)
 
 bool icm42688p_accel_low_power_on(void)
 {
-    icm42688p_set_accel_odr(ODR_25HZ);
+    if (!icm42688p_set_accel_odr(ODR_25HZ)) {
+        return false;
+    }
     set_bank(0);
     /* PWR_MGMT0: TEMP_DIS=1, GYRO_MODE=OFF, ACCEL_MODE=LOW_POWER. */
     if (!icm42688p_write_reg(REG_PWR_MGMT0, 0x22)) {
@@ -228,10 +235,23 @@ bool icm42688p_accel_low_power_on(void)
     return true;
 }
 
-bool icm42688p_motion_low_power_on(void)
+bool icm42688p_motion_tracking_rate_set(void)
 {
-    icm42688p_set_accel_odr(ODR_50HZ);
-    icm42688p_set_gyro_odr(ODR_50HZ);
+    return icm42688p_set_accel_odr(ODR_25HZ) &&
+           icm42688p_set_gyro_odr(ODR_25HZ);
+}
+
+bool icm42688p_motion_boost_rate_set(void)
+{
+    return icm42688p_set_accel_odr(ODR_50HZ) &&
+           icm42688p_set_gyro_odr(ODR_50HZ);
+}
+
+bool icm42688p_motion_tracking_on(void)
+{
+    if (!icm42688p_motion_tracking_rate_set()) {
+        return false;
+    }
     set_bank(0);
     /* PWR_MGMT0: TEMP_DIS=1, GYRO_MODE=LN, ACCEL_MODE=LOW_POWER. */
     if (!icm42688p_write_reg(REG_PWR_MGMT0, 0x2E)) {
@@ -245,8 +265,10 @@ bool icm42688p_motion_low_power_on(void)
 
 bool icm42688p_motion_high_rate_on(void)
 {
-    icm42688p_set_accel_odr(ODR_200HZ);
-    icm42688p_set_gyro_odr(ODR_200HZ);
+    if (!icm42688p_set_accel_odr(ODR_200HZ) ||
+        !icm42688p_set_gyro_odr(ODR_200HZ)) {
+        return false;
+    }
     set_bank(0);
     /* PWR_MGMT0: TEMP_DIS=1, GYRO_MODE=LN, ACCEL_MODE=LN. */
     if (!icm42688p_write_reg(REG_PWR_MGMT0, 0x2F)) {
@@ -294,22 +316,22 @@ void icm42688p_set_gyro_fs(icm42688p_gyro_fs_t fs)
     s_gyro_scale = (2000.0f / (float)(1 << (uint8_t)fs)) / 32768.0f;
 }
 
-void icm42688p_set_accel_odr(icm42688p_odr_t odr)
+bool icm42688p_set_accel_odr(icm42688p_odr_t odr)
 {
     set_bank(0);
     uint8_t reg;
-    if (!icm42688p_read_reg(REG_ACCEL_CONFIG0, &reg, 1)) return;
+    if (!icm42688p_read_reg(REG_ACCEL_CONFIG0, &reg, 1)) return false;
     reg = (reg & 0xF0) | ((uint8_t)odr & 0x0F);
-    icm42688p_write_reg(REG_ACCEL_CONFIG0, reg);
+    return icm42688p_write_reg(REG_ACCEL_CONFIG0, reg);
 }
 
-void icm42688p_set_gyro_odr(icm42688p_odr_t odr)
+bool icm42688p_set_gyro_odr(icm42688p_odr_t odr)
 {
     set_bank(0);
     uint8_t reg;
-    if (!icm42688p_read_reg(REG_GYRO_CONFIG0, &reg, 1)) return;
+    if (!icm42688p_read_reg(REG_GYRO_CONFIG0, &reg, 1)) return false;
     reg = (reg & 0xF0) | ((uint8_t)odr & 0x0F);
-    icm42688p_write_reg(REG_GYRO_CONFIG0, reg);
+    return icm42688p_write_reg(REG_GYRO_CONFIG0, reg);
 }
 
 float icm42688p_get_accel_scale(void) { return s_accel_scale; }

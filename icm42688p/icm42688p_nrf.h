@@ -116,12 +116,18 @@ bool icm42688p_accel_high_rate_on(void);
  */
 bool icm42688p_accel_low_power_on(void);
 
-/**@brief Enable accelerometer and gyroscope at 50 Hz for motion monitoring.
+/**@brief Enable accelerometer and gyroscope at 25 Hz for normal motion tracking.
  *
  * The accelerometer uses low-power mode, the gyroscope uses low-noise mode,
  * and the temperature sensor remains disabled.
  */
-bool icm42688p_motion_low_power_on(void);
+bool icm42688p_motion_tracking_on(void);
+
+/**@brief Change an already-running six-axis stream to 25 Hz tracking. */
+bool icm42688p_motion_tracking_rate_set(void);
+
+/**@brief Change an already-running six-axis stream to a 50 Hz boost. */
+bool icm42688p_motion_boost_rate_set(void);
 
 /**@brief Enable accelerometer and gyroscope at 200 Hz for a short motion window.
  *
@@ -151,10 +157,10 @@ void icm42688p_set_accel_fs(icm42688p_accel_fs_t fs);
 void icm42688p_set_gyro_fs(icm42688p_gyro_fs_t fs);
 
 /**@brief 设置加速度计 ODR */
-void icm42688p_set_accel_odr(icm42688p_odr_t odr);
+bool icm42688p_set_accel_odr(icm42688p_odr_t odr);
 
 /**@brief 设置陀螺仪 ODR */
-void icm42688p_set_gyro_odr(icm42688p_odr_t odr);
+bool icm42688p_set_gyro_odr(icm42688p_odr_t odr);
 
 /**@brief 获取加速度计量程对应的 scale 值 (用于原始值转换) */
 float icm42688p_get_accel_scale(void);
