@@ -133,34 +133,30 @@ static ble_uuid_t m_adv_uuids[]          =                                      
 #define FPU_EXCEPTION_MASK               0x0000009F                      //!< FPU exception mask used to clear exceptions in FPSCR register.
 #define FPU_FPSCR_REG_STACK_OFF          0x40                            //!< Offset of FPSCR register stacked during interrupt handling in FPU part stack
 
-/* Adaptive sensing: accel-only at rest, 25 Hz six-axis tracking during normal
-   motion, and a bounded 50 Hz boost around a motion/vibration candidate. */
+/* Test-machine sensing: use the gyro at 25 Hz to count complete gait cycles.
+   After cycle 4, capture the complete fifth cycle at 50 Hz for vibration
+   assessment, then send one combined BLE result for the five-cycle batch. */
 #define ACCEL_IDLE_SAMPLE_PERIOD_MS      40U      /* 25 Hz accelerometer low-power gate. */
 #define GYRO_TRACK_SAMPLE_PERIOD_MS      40U      /* 25 Hz normal step tracking. */
-#define GYRO_BOOST_SAMPLE_PERIOD_MS      20U      /* 50 Hz short candidate window. */
-#define STATUS_HEARTBEAT_MS              5000U
-#define STEP_REPORT_MIN_INTERVAL_MS      2000U
-#define STEP_REPORT_BATCH_STEPS          3U
+#define CYCLE_CAPTURE_SAMPLE_PERIOD_MS   20U      /* 50 Hz for the complete fifth cycle. */
+#define STATUS_HEARTBEAT_MS             30000U
+#define CYCLE_REPORT_BATCH_SIZE           5U
+#define CYCLE_CAPTURE_START_COUNT         4U
+#define CYCLE_CAPTURE_TIMEOUT_MS        1500U
 #define GRAVITY_EMA_ALPHA_25HZ           0.02f
 #define GRAVITY_EMA_ALPHA_50HZ           0.01f
 #define MOTION_WAKE_SQ_THRESHOLD         0.0100f  /* 0.10 g dynamic acceleration. */
 #define MOTION_WAKE_CONFIRM_SAMPLES      2U       /* 80 ms at the 25 Hz idle rate. */
 #define MOTION_KEEP_AWAKE_SQ_THRESHOLD   0.0064f  /* 0.08 g while gyro is active. */
 #define MOTION_KEEP_AWAKE_GYRO_DPS       10.0f
-#define MOTION_BOOST_SQ_THRESHOLD        0.0400f  /* 0.20 g dynamic candidate. */
-#define GYRO_BOOST_THRESHOLD_DPS         60.0f
-#define GYRO_BOOST_DURATION_MS           600U
-#define GYRO_BOOST_COOLDOWN_MS           1400U
 #define GYRO_IDLE_TIMEOUT_MS             3000U
 #define STEP_GYRO_THRESHOLD_DPS          40.0f    /* Reject small wrist jitter and gyro noise. */
 #define STEP_CONFIRM_MS                   60U      /* Direction must persist for at least 60 ms. */
 #define STEP_MIN_REVERSAL_MS             100U      /* Reject a sign spike sooner than 100 ms. */
 #define STEP_GYRO_TIMEOUT_MS            1500U      /* Opposite direction must arrive within 1.5 s. */
 #define STEP_REFRACTORY_MS               240U      /* 240 ms after a completed movement. */
-#define VIBRATION_WINDOW_MS              1000U
 #define VIBRATION_RMS_SQ_THRESHOLD       0.1225f  /* 0.35 g RMS. */
 #define VIBRATION_PEAK_SQ_THRESHOLD      1.44f    /* 1.20 g dynamic peak. */
-#define VIBRATION_ALARM_HOLD_WINDOWS     3U
 
 typedef enum
 {
@@ -175,7 +171,7 @@ typedef enum
 {
     SENSOR_MODE_ACCEL_IDLE,
     SENSOR_MODE_GYRO_TRACKING,
-    SENSOR_MODE_GYRO_BOOST
+    SENSOR_MODE_CYCLE_CAPTURE
 } sensor_mode_t;
 
 static volatile bool s_sample_due = false;
@@ -197,12 +193,13 @@ static uint16_t      s_step_opposite_ms = 0;
 static uint16_t      s_step_timeout_ms = 0;
 static uint16_t      s_step_refractory_ms = 0;
 static uint16_t      s_report_elapsed_ms = 0;
-static bool          s_step_report_pending = false;
-static uint32_t      s_last_reported_step_count = 0;
+static uint8_t       s_cycle_batch_count = 0;
+static bool          s_cycle_capture_active = false;
+static bool          s_cycle_capture_start_requested = false;
+static bool          s_cycle_capture_stop_requested = false;
 static uint8_t       s_motion_wake_samples = 0;
 static uint16_t      s_active_quiet_ms = 0;
-static uint16_t      s_boost_elapsed_ms = 0;
-static uint16_t      s_boost_cooldown_ms = 0;
+static uint16_t      s_cycle_capture_elapsed_ms = 0;
 static bool          s_gravity_ready = false;
 static float         s_gravity_x = 0.0f;
 static float         s_gravity_y = 0.0f;
@@ -210,8 +207,6 @@ static float         s_gravity_z = 0.0f;
 static float         s_vibration_energy_sum = 0.0f;
 static float         s_vibration_peak_sq = 0.0f;
 static uint16_t      s_vibration_energy_duration_ms = 0;
-static uint16_t      s_vibration_window_elapsed_ms = 0;
-static uint8_t       s_vibration_alarm_hold = 0;
 static bool          s_vibration_severe = false;
 static bool          s_status_dirty = false;
 static bool          s_warning_pending = false;
@@ -765,7 +760,6 @@ static void vibration_window_reset(void)
     s_vibration_energy_sum = 0.0f;
     s_vibration_peak_sq = 0.0f;
     s_vibration_energy_duration_ms = 0;
-    s_vibration_window_elapsed_ms = 0;
 }
 
 static void gyro_step_state_reset(void)
@@ -786,13 +780,13 @@ static void motion_session_reset(void)
     vibration_window_reset();
     gyro_step_state_reset();
     s_report_elapsed_ms = 0;
-    s_step_report_pending = false;
-    s_last_reported_step_count = s_step_count;
+    s_cycle_batch_count = 0;
+    s_cycle_capture_active = false;
+    s_cycle_capture_start_requested = false;
+    s_cycle_capture_stop_requested = false;
     s_motion_wake_samples = 0;
     s_active_quiet_ms = 0;
-    s_boost_elapsed_ms = 0;
-    s_boost_cooldown_ms = 0;
-    s_vibration_alarm_hold = 0;
+    s_cycle_capture_elapsed_ms = 0;
     s_vibration_severe = false;
     s_warning_pending = false;
     s_status_dirty = true;
@@ -801,32 +795,24 @@ static void motion_session_reset(void)
 static void vibration_window_finish(void)
 {
     bool old_state = s_vibration_severe;
+    bool severe_now = false;
 
     if (s_vibration_energy_duration_ms > 0U)
     {
-        bool severe_now =
+        severe_now =
             ((s_vibration_energy_sum /
               (float)s_vibration_energy_duration_ms) >=
              VIBRATION_RMS_SQ_THRESHOLD) ||
             (s_vibration_peak_sq >= VIBRATION_PEAK_SQ_THRESHOLD);
-
-        if (severe_now)
-        {
-            s_vibration_alarm_hold = VIBRATION_ALARM_HOLD_WINDOWS;
-            if (!old_state)
-            {
-                s_warning_pending = true;
-            }
-        }
-        else if (s_vibration_alarm_hold > 0U)
-        {
-            s_vibration_alarm_hold--;
-        }
-        s_vibration_severe = (s_vibration_alarm_hold > 0U);
     }
 
-    /* The warning packet announces the rising edge. Send a normal status when
-       the alarm clears so the phone can return its UI to V:0. */
+    s_vibration_severe = severe_now;
+    if (severe_now && !old_state)
+    {
+        s_warning_pending = true;
+    }
+
+    /* Each fifth-cycle capture produces an independent V result. */
     if (old_state && !s_vibration_severe)
     {
         s_status_dirty = true;
@@ -850,7 +836,7 @@ static float gyro_abs_max(icm42688p_data_t const * p_imu)
     return (maximum > az) ? maximum : az;
 }
 
-static void gyro_step_process(icm42688p_data_t const * p_imu)
+static bool gyro_step_process(icm42688p_data_t const * p_imu)
 {
     float ax = (p_imu->gyro_x < 0.0f) ? -p_imu->gyro_x : p_imu->gyro_x;
     float ay = (p_imu->gyro_y < 0.0f) ? -p_imu->gyro_y : p_imu->gyro_y;
@@ -867,7 +853,7 @@ static void gyro_step_process(icm42688p_data_t const * p_imu)
         {
             s_step_refractory_ms = 0U;
         }
-        return;
+        return false;
     }
 
     if (s_step_first_sign == 0)
@@ -928,7 +914,7 @@ static void gyro_step_process(icm42688p_data_t const * p_imu)
             s_step_opposite_ms = 0;
             s_step_timeout_ms = 0;
         }
-        return;
+        return false;
     }
 
     value = gyro_axis_value(p_imu, s_step_axis);
@@ -947,18 +933,12 @@ static void gyro_step_process(icm42688p_data_t const * p_imu)
     if (s_step_opposite_ms >= STEP_CONFIRM_MS)
     {
         s_step_count++;
-        s_step_report_pending = true;
-        if (((s_step_count - s_last_reported_step_count) >=
-             STEP_REPORT_BATCH_STEPS) ||
-            (s_report_elapsed_ms >= STEP_REPORT_MIN_INTERVAL_MS))
-        {
-            s_status_dirty = true;
-        }
         s_step_axis = -1;
         s_step_first_sign = 0;
         s_step_opposite_ms = 0;
         s_step_timeout_ms = 0;
         s_step_refractory_ms = STEP_REFRACTORY_MS;
+        return true;
     }
     else if (s_step_timeout_ms >= STEP_GYRO_TIMEOUT_MS)
     {
@@ -966,6 +946,34 @@ static void gyro_step_process(icm42688p_data_t const * p_imu)
         s_step_first_sign = 0;
         s_step_opposite_ms = 0;
         s_step_timeout_ms = 0;
+    }
+    return false;
+}
+
+static void cycle_batch_on_complete(void)
+{
+    if (s_cycle_batch_count < CYCLE_REPORT_BATCH_SIZE)
+    {
+        s_cycle_batch_count++;
+    }
+
+    if (s_cycle_batch_count == CYCLE_CAPTURE_START_COUNT)
+    {
+        /* Cycle 4 has just ended. Start 50 Hz before cycle 5 begins. */
+        s_cycle_capture_start_requested = true;
+    }
+    else if (s_cycle_batch_count >= CYCLE_REPORT_BATCH_SIZE)
+    {
+        /* Cycle 5 has just ended. Finalize its vibration result and report
+           the cumulative count once for this five-cycle batch. */
+        if (s_cycle_capture_active)
+        {
+            vibration_window_finish();
+            s_cycle_capture_active = false;
+        }
+        s_cycle_capture_stop_requested = true;
+        s_cycle_batch_count = 0U;
+        s_status_dirty = true;
     }
 }
 
@@ -975,14 +983,15 @@ static float motion_process(icm42688p_data_t const * p_imu, bool gyro_valid)
     float dy;
     float dz;
     float vibration_sq = 0.0f;
+    bool cycle_completed = false;
     float gravity_alpha =
-        (s_sample_period_ms == GYRO_BOOST_SAMPLE_PERIOD_MS) ?
+        (s_sample_period_ms == CYCLE_CAPTURE_SAMPLE_PERIOD_MS) ?
         GRAVITY_EMA_ALPHA_50HZ : GRAVITY_EMA_ALPHA_25HZ;
 
     if (gyro_valid)
     {
         /* Step count is derived only from a signed gyro reversal. */
-        gyro_step_process(p_imu);
+        cycle_completed = gyro_step_process(p_imu);
     }
 
     if (!s_gravity_ready)
@@ -1002,33 +1011,23 @@ static float motion_process(icm42688p_data_t const * p_imu, bool gyro_valid)
         dz = p_imu->acc_z - s_gravity_z;
         vibration_sq = dx * dx + dy * dy + dz * dz;
 
-        /* Weight the RMS energy by time so a 50 Hz boost cannot bias the
-           one-second vibration decision compared with a 25 Hz interval. */
-        s_vibration_energy_sum +=
-            vibration_sq * (float)s_sample_period_ms;
-        s_vibration_energy_duration_ms += s_sample_period_ms;
-        if (vibration_sq > s_vibration_peak_sq)
+        if (s_cycle_capture_active)
         {
-            s_vibration_peak_sq = vibration_sq;
-        }
-
-        /* A very large single shock is reported immediately instead of waiting
-           for the one-second RMS window to finish. */
-        if (vibration_sq >= VIBRATION_PEAK_SQ_THRESHOLD)
-        {
-            if (!s_vibration_severe)
+            /* Only the complete fifth cycle contributes to the vibration
+               result. Weight by time so the RMS remains rate-independent. */
+            s_vibration_energy_sum +=
+                vibration_sq * (float)s_sample_period_ms;
+            s_vibration_energy_duration_ms += s_sample_period_ms;
+            if (vibration_sq > s_vibration_peak_sq)
             {
-                s_warning_pending = true;
+                s_vibration_peak_sq = vibration_sq;
             }
-            s_vibration_alarm_hold = VIBRATION_ALARM_HOLD_WINDOWS;
-            s_vibration_severe = true;
         }
     }
 
-    s_vibration_window_elapsed_ms += s_sample_period_ms;
-    if (s_vibration_window_elapsed_ms >= VIBRATION_WINDOW_MS)
+    if (cycle_completed)
     {
-        vibration_window_finish();
+        cycle_batch_on_complete();
     }
 
     if (s_report_elapsed_ms < STATUS_HEARTBEAT_MS)
@@ -1039,9 +1038,7 @@ static float motion_process(icm42688p_data_t const * p_imu, bool gyro_valid)
             s_report_elapsed_ms = STATUS_HEARTBEAT_MS;
         }
     }
-    if ((s_step_report_pending &&
-         (s_report_elapsed_ms >= STEP_REPORT_MIN_INTERVAL_MS)) ||
-        (s_report_elapsed_ms >= STATUS_HEARTBEAT_MS))
+    if (s_report_elapsed_ms >= STATUS_HEARTBEAT_MS)
     {
         s_status_dirty = true;
     }
@@ -1059,8 +1056,6 @@ static void ble_send_status(void)
     if (ble_send((uint8_t *)output, (uint16_t)len))
     {
         s_status_dirty = false;
-        s_step_report_pending = false;
-        s_last_reported_step_count = s_step_count;
         s_report_elapsed_ms = 0;
     }
 }
@@ -1087,8 +1082,7 @@ static bool sensor_enter_accel_idle(void)
     s_sensor_mode = SENSOR_MODE_ACCEL_IDLE;
     s_motion_wake_samples = 0;
     s_active_quiet_ms = 0;
-    s_boost_elapsed_ms = 0;
-    s_boost_cooldown_ms = 0;
+    s_cycle_capture_elapsed_ms = 0;
     sample_timer_start(ACCEL_IDLE_SAMPLE_PERIOD_MS);
     return true;
 }
@@ -1105,24 +1099,26 @@ static bool sensor_start_gyro_tracking(void)
     s_sensor_mode = SENSOR_MODE_GYRO_TRACKING;
     s_motion_wake_samples = 0;
     s_active_quiet_ms = 0;
-    s_boost_elapsed_ms = 0;
-    s_boost_cooldown_ms = 0;
+    s_cycle_capture_elapsed_ms = 0;
     sample_timer_start(GYRO_TRACK_SAMPLE_PERIOD_MS);
     return true;
 }
 
-static bool sensor_enter_gyro_boost(void)
+static bool sensor_enter_cycle_capture(void)
 {
     sample_timer_stop();
-    if (!icm42688p_motion_boost_rate_set())
+    if (!icm42688p_motion_capture_rate_set())
     {
         return false;
     }
 
-    /* Preserve the partially observed gyro reversal across the rate change. */
-    s_sensor_mode = SENSOR_MODE_GYRO_BOOST;
-    s_boost_elapsed_ms = 0;
-    sample_timer_start(GYRO_BOOST_SAMPLE_PERIOD_MS);
+    /* Preserve the gyro reversal state across the rate change. The complete
+       next cycle is the fifth cycle and is the only vibration sample window. */
+    vibration_window_reset();
+    s_cycle_capture_active = true;
+    s_cycle_capture_elapsed_ms = 0;
+    s_sensor_mode = SENSOR_MODE_CYCLE_CAPTURE;
+    sample_timer_start(CYCLE_CAPTURE_SAMPLE_PERIOD_MS);
     return true;
 }
 
@@ -1134,10 +1130,9 @@ static bool sensor_return_gyro_tracking(void)
         return false;
     }
 
-    /* Keep the step detector state; only rate and boost bookkeeping change. */
+    /* Keep the step detector state; only the sampling rate changes. */
     s_sensor_mode = SENSOR_MODE_GYRO_TRACKING;
-    s_boost_elapsed_ms = 0;
-    s_boost_cooldown_ms = GYRO_BOOST_COOLDOWN_MS;
+    s_cycle_capture_elapsed_ms = 0;
     sample_timer_start(GYRO_TRACK_SAMPLE_PERIOD_MS);
     return true;
 }
@@ -1149,8 +1144,10 @@ static void monitor_stop(void)
     s_sensor_mode = SENSOR_MODE_ACCEL_IDLE;
     s_motion_wake_samples = 0;
     s_active_quiet_ms = 0;
-    s_boost_elapsed_ms = 0;
-    s_boost_cooldown_ms = 0;
+    s_cycle_capture_active = false;
+    s_cycle_capture_start_requested = false;
+    s_cycle_capture_stop_requested = false;
+    s_cycle_capture_elapsed_ms = 0;
 }
 
 static bool monitor_start(void)
@@ -1280,40 +1277,37 @@ static void idle_state_handle(void)
                     s_active_quiet_ms += s_sample_period_ms;
                 }
 
-                if (s_active_quiet_ms >= GYRO_IDLE_TIMEOUT_MS)
+                if (s_cycle_capture_stop_requested)
                 {
-                    mode_ok = sensor_enter_accel_idle();
-                }
-                else if (s_sensor_mode == SENSOR_MODE_GYRO_BOOST)
-                {
-                    s_boost_elapsed_ms += GYRO_BOOST_SAMPLE_PERIOD_MS;
-                    if (s_boost_elapsed_ms >= GYRO_BOOST_DURATION_MS)
+                    s_cycle_capture_stop_requested = false;
+                    if (s_sensor_mode == SENSOR_MODE_CYCLE_CAPTURE)
                     {
                         mode_ok = sensor_return_gyro_tracking();
                     }
                 }
-                else
+                else if (s_cycle_capture_start_requested)
                 {
-                    bool boost_candidate =
-                        (vibration_sq >= MOTION_BOOST_SQ_THRESHOLD) ||
-                        (gyro_abs_max(&imu_data) >= GYRO_BOOST_THRESHOLD_DPS);
-
-                    if (s_boost_cooldown_ms > s_sample_period_ms)
+                    s_cycle_capture_start_requested = false;
+                    mode_ok = sensor_enter_cycle_capture();
+                }
+                else if (s_sensor_mode == SENSOR_MODE_CYCLE_CAPTURE)
+                {
+                    s_cycle_capture_elapsed_ms +=
+                        CYCLE_CAPTURE_SAMPLE_PERIOD_MS;
+                    if (s_cycle_capture_elapsed_ms >=
+                        CYCLE_CAPTURE_TIMEOUT_MS)
                     {
-                        s_boost_cooldown_ms -= s_sample_period_ms;
+                        /* Do not remain at 50 Hz if the expected fifth-cycle
+                           reversal is missing. Keep batch count 4 so the next
+                           valid cycle still completes and reports the batch. */
+                        vibration_window_finish();
+                        s_cycle_capture_active = false;
+                        mode_ok = sensor_return_gyro_tracking();
                     }
-                    else
-                    {
-                        s_boost_cooldown_ms = 0U;
-                    }
-
-                    /* Enforce the 600 ms / 1.4 s duty cycle even during a
-                       severe vibration. WARNING is already queued by
-                       motion_process(), so reporting remains immediate. */
-                    if (boost_candidate && (s_boost_cooldown_ms == 0U))
-                    {
-                        mode_ok = sensor_enter_gyro_boost();
-                    }
+                }
+                else if (s_active_quiet_ms >= GYRO_IDLE_TIMEOUT_MS)
+                {
+                    mode_ok = sensor_enter_accel_idle();
                 }
             }
         }

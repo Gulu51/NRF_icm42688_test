@@ -241,7 +241,7 @@ bool icm42688p_motion_tracking_rate_set(void)
            icm42688p_set_gyro_odr(ODR_25HZ);
 }
 
-bool icm42688p_motion_boost_rate_set(void)
+bool icm42688p_motion_capture_rate_set(void)
 {
     return icm42688p_set_accel_odr(ODR_50HZ) &&
            icm42688p_set_gyro_odr(ODR_50HZ);

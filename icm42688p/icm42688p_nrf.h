@@ -126,8 +126,8 @@ bool icm42688p_motion_tracking_on(void);
 /**@brief Change an already-running six-axis stream to 25 Hz tracking. */
 bool icm42688p_motion_tracking_rate_set(void);
 
-/**@brief Change an already-running six-axis stream to a 50 Hz boost. */
-bool icm42688p_motion_boost_rate_set(void);
+/**@brief Change an already-running six-axis stream to 50 Hz cycle capture. */
+bool icm42688p_motion_capture_rate_set(void);
 
 /**@brief Enable accelerometer and gyroscope at 200 Hz for a short motion window.
  *
