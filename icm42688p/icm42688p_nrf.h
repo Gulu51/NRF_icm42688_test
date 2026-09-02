@@ -87,6 +87,13 @@ typedef struct {
     float temp_c;      // 温度 (°C)
 } icm42688p_data_t;
 
+/** APEX pedometer output generated inside the ICM42688P. */
+typedef struct {
+    uint16_t step_count;       /**< Native 16-bit hardware step counter. */
+    uint8_t  cadence_raw;      /**< Samples per step in unsigned 6.2 format. */
+    uint8_t  activity;         /**< 0 unknown, 1 walking, 2 running. */
+} icm42688p_apex_data_t;
+
 /* ═══════════════════════════════════════════════════
    函数原型
    ═══════════════════════════════════════════════════ */
@@ -115,6 +122,20 @@ bool icm42688p_accel_high_rate_on(void);
  * temperature sensor remain disabled.
  */
 bool icm42688p_accel_low_power_on(void);
+
+/**@brief Start the on-chip APEX pedometer.
+ *
+ * The accelerometer runs at 50 Hz in low-power mode. The gyroscope and
+ * temperature sensor stay off. Pedometer processing is performed by the
+ * sensor DMP, so the host only needs to read the result periodically.
+ */
+bool icm42688p_apex_pedometer_on(void);
+
+/**@brief Disable APEX pedometer processing and all sensing blocks. */
+bool icm42688p_apex_pedometer_off(void);
+
+/**@brief Read the APEX step counter, cadence and activity classification. */
+bool icm42688p_apex_read(icm42688p_apex_data_t *p_data);
 
 /**@brief Enable accelerometer and gyroscope at 25 Hz for normal motion tracking.
  *

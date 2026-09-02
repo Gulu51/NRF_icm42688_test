@@ -26,9 +26,27 @@ Keil MDK 工程：
 main                                  已测试的稳定版本
 feature/phase-aware-low-power         1 Hz试验机分阶段采样版本
 feature/mobile-low-power-step-warning 当前非试验机低功耗计步版本
+feature/icm42688-apex-pedometer-low-power 片上APEX计步低功耗版本
 ```
 
 不要直接在 `main` 上进行未经验证的算法修改。新功能测试通过后再合并到 `main` 并创建新的版本标签。
+
+## `feature/icm42688-apex-pedometer-low-power` 片上计步版本
+
+ICM-42688-P 本身带有 APEX（Advanced Pedometer and Event Detection）运动处理引擎，能够直接根据加速度计数据输出 16 位步数、步频和走/跑分类。本分支从 `feature/phase-aware-low-power` 的最终版继续开发，但把计步主路径从 nRF52832 的陀螺仪反转算法改成 ICM42688-P 片上计步器：
+
+- `START` 后以 50 Hz 低功耗模式运行加速度计和 APEX DMP；陀螺仪与温度传感器全程关闭。
+- APEX 使用 TDK 数据手册给出的默认计步阈值，并使用普通行走灵敏度；DMP 省电位暂不启用，因为该模式还要求正确配置 WOM 唤醒源。
+- 普通计步阶段 nRF52832 每 200 ms 仅读取 4 字节 APEX 结果，不再每 20/40 ms 读取并计算六轴数据。
+- 第 4 步被 APEX 确认后，nRF52832 临时以 50 Hz 读取加速度数据，用于第 5 步附近的振动 RMS/峰值判断；第 5 步完成或窗口达到 2 秒后恢复 200 ms 轮询。
+- 每累计 5 步发送一次 `S:<累计步数>,V:<振动状态>`，无新结果时保留 30 秒心跳；强振动仍立即发送 `WARNING,V:1`。
+- APEX 原始计数器为 16 位，应用层使用差值累加为 32 位，并处理自然回绕；异常大跳变不会被误加到总步数。
+
+这里的 `S` 已改为 APEX 判定的“人体步数”，不再是旧试验机版本中陀螺仪正反转定义的“完整机械周期”。APEX 启动时会先缓冲并验证若干步，因此第一组计数可能一次跳到约 5 步，首组的第 5 步振动窗口可能不完整；后续稳定行走时会逐步更新。实际计步准确率和平均/峰值电流仍需在目标佩戴位置、步速和手机连接参数下实测。
+
+当前 PCB 工程没有确认 ICM42688-P `INT1` 与 nRF52832 的接线，因此本分支采用安全的 200 ms 低频轮询。接好并确认 `INT1` 后，可在下一版改成 APEX 步进中断唤醒，进一步减少 MCU 唤醒次数。
+
+APEX 配置依据：[TDK ICM-42688-P 官方产品页与数据手册](https://www.invensense.tdk.com/en-us/products/6-axis/icm-42688-p)。
 
 ## `feature/phase-aware-low-power` 试验机五周期版本
 

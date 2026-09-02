@@ -19,10 +19,29 @@
 #define REG_TEMP_DATA1        0x1D
 #define REG_ACCEL_DATA_X1     0x1F
 #define REG_GYRO_DATA_X1      0x25
+#define REG_APEX_DATA0        0x31
+#define REG_SIGNAL_PATH_RESET 0x4B
 #define REG_PWR_MGMT0         0x4E
 #define REG_GYRO_CONFIG0      0x4F
 #define REG_ACCEL_CONFIG0     0x50
+#define REG_APEX_CONFIG0      0x56
 #define REG_WHO_AM_I          0x75
+
+/* User Bank 4 APEX tuning registers. */
+#define REG_APEX_CONFIG1_B4   0x40
+#define REG_APEX_CONFIG2_B4   0x41
+#define REG_APEX_CONFIG3_B4   0x42
+#define REG_APEX_CONFIG9_B4   0x48
+
+#define SIGNAL_DMP_INIT_EN         0x40
+#define SIGNAL_DMP_MEM_RESET_EN    0x20
+#define APEX_PED_ENABLE            0x20
+#define APEX_DMP_ODR_50HZ          0x02
+
+/* TDK's documented default pedometer tuning for ICM-42688-P. */
+#define APEX_CONFIG1_PED_DEFAULT   0xA2
+#define APEX_CONFIG2_PED_DEFAULT   0x85
+#define APEX_CONFIG3_PED_DEFAULT   0x51
 
 /* ═══════════════════════════════════════════════════
    静态变量
@@ -88,6 +107,18 @@ static void sw_spi_transfer(const uint8_t *p_tx, uint8_t *p_rx, uint8_t len)
     CS_DIS();
 }
 
+/* Used for write-on-clear/self-clearing registers that cannot be verified by
+   reading the value back. */
+static void write_reg_unchecked(uint8_t reg, uint8_t data)
+{
+    uint8_t tx[2];
+    uint8_t rx[2];
+
+    tx[0] = reg & 0x7F;
+    tx[1] = data;
+    sw_spi_transfer(tx, rx, sizeof(tx));
+}
+
 /* ═══════════════════════════════════════════════════
    寄存器读写
    ═══════════════════════════════════════════════════ */
@@ -129,9 +160,14 @@ bool icm42688p_read_reg(uint8_t reg, uint8_t *p_data, uint8_t len)
 
 static bool set_bank(uint8_t bank)
 {
+    bool ok;
+
     if (s_current_bank == bank) return true;
-    s_current_bank = bank;
-    return icm42688p_write_reg(REG_BANK_SEL, bank);
+    ok = icm42688p_write_reg(REG_BANK_SEL, bank);
+    if (ok) {
+        s_current_bank = bank;
+    }
+    return ok;
 }
 
 /* ═══════════════════════════════════════════════════
@@ -141,8 +177,9 @@ static bool set_bank(uint8_t bank)
 static void soft_reset(void)
 {
     set_bank(0);
-    icm42688p_write_reg(REG_DEVICE_CONFIG, 0x01);
+    write_reg_unchecked(REG_DEVICE_CONFIG, 0x01);
     nrf_delay_ms(2);
+    s_current_bank = 0;
 }
 
 bool icm42688p_self_test(void)
@@ -232,6 +269,108 @@ bool icm42688p_accel_low_power_on(void)
     }
 
     nrf_delay_ms(20);
+    return true;
+}
+
+bool icm42688p_apex_pedometer_on(void)
+{
+    uint8_t apex_config0;
+    uint8_t apex_config9;
+
+    if (!set_bank(0)) {
+        return false;
+    }
+
+    /* Configure the input stream before initializing the DMP. APEX pedometer
+       supports 25/50 Hz; 50 Hz is selected for reliable hand-held walking. */
+    if (!icm42688p_set_accel_odr(ODR_50HZ)) {
+        return false;
+    }
+    if (!icm42688p_write_reg(REG_PWR_MGMT0, 0x22)) {
+        return false;
+    }
+    nrf_delay_ms(1);
+
+    /* Select 50 Hz DMP operation, with all APEX algorithms disabled during
+       initialization. DMP power-save is deliberately cleared because it
+       requires a separately configured WOM source to keep counting. */
+    if (!icm42688p_read_reg(REG_APEX_CONFIG0, &apex_config0, 1)) {
+        return false;
+    }
+    apex_config0 &= 0x04;
+    apex_config0 |= APEX_DMP_ODR_50HZ;
+    if (!icm42688p_write_reg(REG_APEX_CONFIG0, apex_config0)) {
+        return false;
+    }
+
+    write_reg_unchecked(REG_SIGNAL_PATH_RESET, SIGNAL_DMP_MEM_RESET_EN);
+    nrf_delay_ms(1);
+
+    if (!set_bank(4)) {
+        return false;
+    }
+    if (!icm42688p_write_reg(REG_APEX_CONFIG1_B4, APEX_CONFIG1_PED_DEFAULT) ||
+        !icm42688p_write_reg(REG_APEX_CONFIG2_B4, APEX_CONFIG2_PED_DEFAULT) ||
+        !icm42688p_write_reg(REG_APEX_CONFIG3_B4, APEX_CONFIG3_PED_DEFAULT)) {
+        (void)set_bank(0);
+        return false;
+    }
+
+    /* Normal sensitivity is the documented starting point for hand-held
+       walking. Preserve reserved bits in APEX_CONFIG9. */
+    if (!icm42688p_read_reg(REG_APEX_CONFIG9_B4, &apex_config9, 1)) {
+        (void)set_bank(0);
+        return false;
+    }
+    apex_config9 &= (uint8_t)~0x01U;
+    if (!icm42688p_write_reg(REG_APEX_CONFIG9_B4, apex_config9) ||
+        !set_bank(0)) {
+        return false;
+    }
+
+    write_reg_unchecked(REG_SIGNAL_PATH_RESET, SIGNAL_DMP_INIT_EN);
+    nrf_delay_ms(50);
+
+    apex_config0 |= APEX_PED_ENABLE;
+    if (!icm42688p_write_reg(REG_APEX_CONFIG0, apex_config0)) {
+        return false;
+    }
+    nrf_delay_ms(1);
+    MY_LOG_DEBUG("ICM42688P APEX pedometer ON (accel LP 50 Hz, gyro off)");
+    return true;
+}
+
+bool icm42688p_apex_pedometer_off(void)
+{
+    uint8_t apex_config0;
+
+    if (!set_bank(0)) {
+        return false;
+    }
+    if (icm42688p_read_reg(REG_APEX_CONFIG0, &apex_config0, 1)) {
+        apex_config0 &= (uint8_t)~APEX_PED_ENABLE;
+        if (!icm42688p_write_reg(REG_APEX_CONFIG0, apex_config0)) {
+            return false;
+        }
+    }
+    return icm42688p_power_off();
+}
+
+bool icm42688p_apex_read(icm42688p_apex_data_t *p_data)
+{
+    uint8_t raw[4];
+
+    if (!p_data || !set_bank(0)) {
+        return false;
+    }
+    if (!icm42688p_read_reg(REG_APEX_DATA0, raw, sizeof(raw))) {
+        return false;
+    }
+
+    /* APEX_DATA0 is the low counter byte; APEX_DATA1 is the high byte. */
+    p_data->step_count = (uint16_t)raw[0] | ((uint16_t)raw[1] << 8);
+    p_data->cadence_raw = raw[2];
+    p_data->activity = raw[3] & 0x03U;
     return true;
 }
 
